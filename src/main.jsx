@@ -3,12 +3,37 @@ import React,{useEffect,useMemo,useState} from 'react';
 import{createRoot}from'react-dom/client';
 import{createClient}from'@supabase/supabase-js';
 import{Camera,LayoutDashboard,ClipboardList,History,Users,LogOut,Plus,Minus,Download,RefreshCw}from'lucide-react';
-import{createWorker}from'tesseract.js';
 import*as XLSX from'xlsx';
 import './style.css';
 const url=import.meta.env.VITE_SUPABASE_URL,key=import.meta.env.VITE_SUPABASE_ANON_KEY;
 const db=url&&key?createClient(url,key):null;
 const empty=()=>({address:'',duvet:0,small:0,large:0});
+// 주소 사진을 꼭 찍을 필요 없이, 2글자 이상 입력하면 기존 주소를 기기에서 즉시 검색합니다.
+const normalizedAddress=s=>String(s||'').toLowerCase().replace(/[^가-힣a-z0-9]/g,'');
+const addressBigrams=s=>{const out=new Set();for(let i=0;i<s.length-1;i++)out.add(s.slice(i,i+2));return out};
+function photoAddressScore(ocrLine,known){
+ const a=normalizedAddress(ocrLine),b=normalizedAddress(known);
+ if(a.length<3||b.length<3)return 0;
+ if(a===b)return 1000;
+ if(b.includes(a))return 850+Math.min(a.length,80);
+ if(a.includes(b))return 830+Math.min(b.length,80);
+ const A=addressBigrams(a),B=addressBigrams(b);let common=0;
+ for(const n of A)if(B.has(n))common++;
+ const dice=2*common/Math.max(1,A.size+B.size);
+ return dice>=.4?Math.round(dice*700):0;
+}
+function findPhotoMatches(raw,addresses){
+ const lines=String(raw||'').split(/\r?\n/).map(x=>x.trim()).filter(x=>normalizedAddress(x).length>=3).slice(0,18);
+ if(!lines.length)return [];
+ return addresses.map(address=>({address,score:Math.max(...lines.map(line=>photoAddressScore(line,address)))}))
+ .filter(x=>x.score>=280).sort((a,b)=>b.score-a.score||a.address.localeCompare(b.address,'ko')).slice(0,8);
+}
+// OCR 라이브러리와 한글 데이터는 사진 버튼을 눌렀을 때만 내려받고, 같은 화면에서 재사용합니다.
+let ocrWorkerPromise;
+function getOcrWorker(){
+ if(!ocrWorkerPromise)ocrWorkerPromise=import('tesseract.js').then(({createWorker})=>createWorker('kor+eng')).catch(error=>{ocrWorkerPromise=null;throw error});
+ return ocrWorkerPromise;
+}
 const time=e=>new Date(e.created_at).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const period=e=>new Date(e.created_at).toLocaleString('en-US',{timeZone:'Asia/Seoul',hour:'2-digit',hourCycle:'h23'}).split(':')[0]<12?'오전':'오후';
 const dateKST=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -24,11 +49,49 @@ const[session,setSession]=useState(null),[ready,setReady]=useState(false),[profi
 const[rows,setRows]=useState([]),[changes,setChanges]=useState([]),[staff,setStaff]=useState([]);
 const[startDate,setStartDate]=useState(dateKST()),[endDate,setEndDate]=useState(dateKST()),[preset,setPreset]=useState('today'),[person,setPerson]=useState('all'),[shift,setShift]=useState('전체'),[addressSearch,setAddressSearch]=useState('');
 const[form,setForm]=useState(empty()),[editing,setEditing]=useState(null),[reason,setReason]=useState('주소지 수정'),[note,setNote]=useState('');
+const[knownAddresses,setKnownAddresses]=useState([]),[addressLookupState,setAddressLookupState]=useState('idle'),[chosenExistingAddress,setChosenExistingAddress]=useState(''),[photoMatches,setPhotoMatches]=useState([]),[photoBusy,setPhotoBusy]=useState(false);
 const[selectedIds,setSelectedIds]=useState([]),[copyNotice,setCopyNotice]=useState('');
 const[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[authMode,setAuthMode]=useState('login'),[email,setEmail]=useState(''),[pass,setPass]=useState(''),[confirmPass,setConfirmPass]=useState(''),[name,setName]=useState('');
 useEffect(()=>{if(!db){setReady(true);return}db.auth.getSession().then(({data})=>{setSession(data.session);setReady(true)});const{data:{subscription}}=db.auth.onAuthStateChange((_event,s)=>setSession(s));return()=>subscription.unsubscribe()},[]);
 useEffect(()=>{if(!session){setProfile(null);return}db.from('profiles').select('*').eq('id',session.user.id).single().then(({data,error})=>{setProfile(data);if(error)setNotice(error.message)})},[session]);
 const owner=profile?.role==='owner';
+// 기존 업무자료 전체에서 '주소 텍스트만' 조회합니다. 직원은 다른 사람의 수량/이력은 볼 수 없습니다.
+useEffect(()=>{
+ if(!db||!profile?.approved||tab!=='entry')return;
+ let stopped=false;
+ setAddressLookupState('loading');
+ db.rpc('list_existing_addresses',{p_limit:10000}).then(({data,error})=>{
+  if(stopped)return;
+  if(error){setAddressLookupState('error');return}
+  setKnownAddresses((data||[]).map(x=>x.address).filter(Boolean));
+  setAddressLookupState('ready');
+ });
+ return()=>{stopped=true};
+},[profile?.id,profile?.approved,tab]);
+const addressInputNormalized=normalizedAddress(form.address);
+const matchingAddresses=useMemo(()=>{
+ if(addressInputNormalized.length<2||chosenExistingAddress===form.address)return [];
+ return knownAddresses.map(address=>{
+  const known=normalizedAddress(address);
+  let rank=0;
+  if(known===addressInputNormalized)rank=1000;
+  else if(known.startsWith(addressInputNormalized))rank=900;
+  else if(known.includes(addressInputNormalized))rank=800;
+  else if(addressInputNormalized.length>=5&&addressInputNormalized.includes(known))rank=700;
+  return {address,rank};
+ }).filter(x=>x.rank>0).sort((a,b)=>b.rank-a.rank||a.address.localeCompare(b.address,'ko')).slice(0,10);
+},[addressInputNormalized,knownAddresses,chosenExistingAddress,form.address]);
+function chooseAddress(address){
+ setForm(previous=>({...previous,address}));
+ setChosenExistingAddress(address);
+ setPhotoMatches([]);
+ setNotice('기존 작업내역의 주소를 선택했습니다. 수량을 입력해 주세요.');
+}
+function editAddress(value){
+ setForm(previous=>({...previous,address:value}));
+ setChosenExistingAddress('');
+ setPhotoMatches([]);
+}
 async function load(){if(!profile?.approved)return;setBusy(true);
 if(!startDate||!endDate||startDate>endDate){setNotice('조회 시작일은 종료일보다 늦을 수 없습니다.');setBusy(false);return}
 const from=startDate+'T00:00:00+09:00',to=new Date(new Date(endDate+'T00:00:00+09:00').getTime()+86400000).toISOString();
@@ -80,37 +143,36 @@ async function login(e){e.preventDefault();setNotice('');if(authMode==='signup'&
 async function logout(){await db.auth.signOut();setTab('entry')}
 async function photo(file){
  if(!file)return;
- setBusy(true);setNotice('사진을 분석 중입니다. 주소가 있는 부분을 크게 촬영하면 인식률이 높아집니다.');
- let worker;
+ setPhotoBusy(true);setPhotoMatches([]);
+ setNotice('사진에서 글자를 읽는 중입니다. 한글 OCR은 시간이 걸릴 수 있습니다. 주소를 직접 입력하면 바로 검색할 수 있습니다.');
  try{
   const image=await createImageBitmap(file);
-  const scale=Math.min(3,Math.max(1,1600/image.width));
-  const canvas=document.createElement('canvas');canvas.width=Math.round(image.width*scale);canvas.height=Math.round(image.height*scale);
-  const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0,canvas.width,canvas.height);
-  const pixels=ctx.getImageData(0,0,canvas.width,canvas.height);
-  for(let i=0;i<pixels.data.length;i+=4){
-   const g=.299*pixels.data[i]+.587*pixels.data[i+1]+.114*pixels.data[i+2];
-   const adjusted=Math.max(0,Math.min(255,(g-128)*1.35+128));
-   pixels.data[i]=pixels.data[i+1]=pixels.data[i+2]=adjusted;
-  }
-  ctx.putImageData(pixels,0,0);image.close();
-  worker=await createWorker('kor+eng');
+  const scale=Math.min(2,Math.min(1,1200/image.width));
+  const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(image,0,0,canvas.width,canvas.height);image.close();
+  const worker=await getOcrWorker();
   const {data}=await worker.recognize(canvas);
   const lines=data.text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   const addressPattern=/(서울|경기|인천|부산|대구|광주|대전|울산|세종|제주|강원|충북|충남|전북|전남|경북|경남|특별시|광역시|특별자치|[가-힣]+[시군구]|[가-힣]+(?:로|길|동|읍|면|리)\s*\d)/;
-  const matched=lines.filter(x=>addressPattern.test(x));
-  const text=(matched.length?matched:lines).join(' ').replace(/\s+/g,' ').trim();
-  setForm(v=>({...v,address:text}));
-  setNotice(text?'인식된 주소를 반드시 확인·수정한 후 등록해 주세요.':'주소를 인식하지 못했습니다. 주소 부분만 가까이 촬영하거나 직접 입력해 주세요.');
- }catch(err){setNotice('사진 인식에 실패했습니다. 주소를 직접 입력해 주세요.');}
- finally{if(worker)await worker.terminate();setBusy(false);}
+  const likely=lines.filter(x=>addressPattern.test(x));
+  const suggestion=(likely.length?likely:lines).join(' ').replace(/\s+/g,' ').trim();
+  const candidates=findPhotoMatches(data.text,knownAddresses);
+  setPhotoMatches(candidates);
+  setChosenExistingAddress('');
+  setForm(previous=>({...previous,address:suggestion}));
+  if(candidates.length)setNotice('과거 작업내역에서 비슷한 주소를 찾았습니다. 아래 후보 중 정확한 주소를 선택해 주세요.');
+  else if(suggestion)setNotice('같은 주소를 찾지 못했습니다. 주소를 확인·수정한 후 신규 주소로 등록해 주세요.');
+  else setNotice('사진에서 주소를 읽지 못했습니다. 주소를 2글자 이상 직접 입력해 주세요.');
+ }catch(error){setNotice('사진 인식에 실패했습니다. 주소의 일부를 직접 입력해 기존 주소를 검색해 주세요.');}
+ finally{setPhotoBusy(false)}
 }
 async function save(e){e.preventDefault();if([...form.address.trim()].length<2){setNotice('주소지는 2글자 이상 입력해 주세요.');return}setBusy(true);
 const clean={address:form.address.trim(),duvet:Number(form.duvet),small:Number(form.small),large:Number(form.large)};
 let error;if(editing){({error}=await db.rpc('revise_entry',{p_id:editing.id,p_address:clean.address,p_duvet:clean.duvet,p_small:clean.small,p_large:clean.large,p_reason:reason,p_note:note}))}
 else{({error}=await db.from('entries').insert({...clean,employee_id:session.user.id}))}
-setBusy(false);if(error){setNotice(error.message);return}setNotice(editing?'수정 내용이 반영되고 이전 수량이 이력에 보존되었습니다.':'수량이 등록되었습니다.');setEditing(null);setForm(empty());setNote('');await load()}
-function startEdit(r){setEditing(r);setForm({address:r.address,duvet:r.duvet,small:r.small,large:r.large});setReason('주소지 수정');setNote('');setTab('entry');window.scrollTo({top:0,behavior:'smooth'})}
+setBusy(false);if(error){setNotice(error.message);return}setNotice(editing?'수정 내용이 반영되고 이전 수량이 이력에 보존되었습니다.':'수량이 등록되었습니다.');setEditing(null);setForm(empty());setNote('');setChosenExistingAddress('');setPhotoMatches([]);
+setKnownAddresses(old=>[clean.address,...old.filter(x=>x!==clean.address)].slice(0,10000));await load()}
+function startEdit(r){setChosenExistingAddress(r.address);setPhotoMatches([]);setEditing(r);setForm({address:r.address,duvet:r.duvet,small:r.small,large:r.large});setReason('주소지 수정');setNote('');setTab('entry');window.scrollTo({top:0,behavior:'smooth'})}
 async function approve(p){const{error}=await db.from('profiles').update({approved:!p.approved}).eq('id',p.id);if(error)setNotice(error.message);else load()}
 function exportXlsx(){const records=filtered.map(r=>({등록시간:time(r),시간대:period(r),직원:names[r.employee_id]||r.employee_id,주소:r.address,이불커버:r.duvet,'수건 소':r.small,'수건 대':r.large}));const sheet=XLSX.utils.json_to_sheet(records),book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,sheet,'작업내역');XLSX.writeFile(book,`무무베딩_${startDate}_${endDate}.xlsx`)}
 const entryTable=(list,allowEdit=false,selectable=false)=><div className="scroll"><table><thead><tr>{selectable&&<th><input type="checkbox" aria-label="현재 검색 결과 전체 선택" checked={list.length>0&&list.every(r=>selectedIds.includes(String(r.id)))} onChange={()=>toggleAll(list)}/></th>}<th>등록시간</th><th>직원</th><th>주소지</th><th>이불커버</th><th>수건 소</th><th>수건 대</th>{allowEdit&&<th>수정</th>}</tr></thead><tbody>{list.map(r=><tr key={r.id} className={selectable&&selectedIds.includes(String(r.id))?'selected-entry':''}>{selectable&&<td><input type="checkbox" aria-label={`${r.address} 작업 선택`} checked={selectedIds.includes(String(r.id))} onChange={()=>toggleSelected(r.id)}/></td>}<td>{time(r)}</td><td>{names[r.employee_id]||'직원'}</td><td>{r.address}</td><td>{r.duvet}</td><td>{r.small}</td><td>{r.large}</td>{allowEdit&&<td><button onClick={()=>startEdit(r)}>수정</button></td>}</tr>)}</tbody></table>{!list.length&&<p className="muted">등록된 내역이 없습니다.</p>}</div>;
@@ -123,7 +185,7 @@ if(!profile.approved)return <div className="center"><div className="login"><div 
 const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['mine','내 작업내역',ClipboardList],['history','수정이력',History]];
 const shownChanges=changes.filter(x=>owner||x.changed_by===session.user.id);
 return <div className="shell"><header><div><div className="brand">MUMU BEDDING</div><h1>수량관리 시스템</h1></div><div className="user"><span>{profile.name} {owner?'· 사업주':''}</span><button title="로그아웃" onClick={logout}><LogOut size={17}/></button></div></header><nav>{tabs.map(([id,label,Icon])=><button key={id} className={tab===id?'selected':''} onClick={()=>setTab(id)}><Icon size={17}/>{label}</button>)}</nav><main>{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}>닫기</button></div>}
-{tab==='entry'&&<section className="panel editor"><h2>{editing?'작업내역 수정':'작업 수량 등록'}</h2><form onSubmit={save}><label className="camera"><Camera size={24}/> 주소 사진 촬영 · 업로드<input type="file" accept="image/*" capture="environment" onChange={e=>photo(e.target.files?.[0])}/></label><label>주소지 (2글자 이상)<input required minLength={2} value={form.address} onChange={e=>setForm({...form,address:e.target.value})} placeholder="사진 인식 결과를 확인하거나 직접 입력"/></label><div className="quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([k,label])=><div className="quantity" key={k}><span>{label}</span><div><button type="button" onClick={()=>setForm({...form,[k]:Math.max(0,form[k]-1)})}><Minus size={18}/></button><input className="quantity-input" type="number" min="0" step="1" inputMode="numeric" aria-label={`${label} 수량 직접 입력`} value={form[k]} onChange={e=>setForm(v=>({...v,[k]:e.target.value===""?0:Math.max(0,Math.floor(Number(e.target.value)||0))}))}/><button type="button" onClick={()=>setForm({...form,[k]:form[k]+1})}><Plus size={18}/></button></div></div>)}</div>{editing&&<><label>수정 사유<select value={reason} onChange={e=>setReason(e.target.value)}>{['주소지 수정','이불커버 수량 수정','수건 소 수량 수정','수건 대 수량 수정','전체 수정'].map(x=><option key={x}>{x}</option>)}</select></label><label>상세 수정 사유<textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="수정 이유를 입력하세요"/></label></>}<button className="primary" disabled={busy}>{busy?'처리 중...':editing?'수정 즉시 반영':'작업 수량 등록'}</button>{editing&&<button type="button" onClick={()=>{setEditing(null);setForm(empty())}}>수정 취소</button>}</form></section>}
+{tab==='entry'&&<section className="panel editor"><h2>{editing?'작업내역 수정':'작업 수량 등록'}</h2><form onSubmit={save}><div className="address-entry-block"><div className="address-instruction"><strong>1. 기존 주소 검색 또는 신규 주소 입력</strong><p>주소 일부를 2글자 이상 입력하면 과거 작업내역에서 자동 검색합니다. 없으면 그대로 새 주소를 입력하세요.</p></div><label>주소지 (2글자 이상)<input autoComplete="off" required minLength={2} value={form.address} onChange={e=>editAddress(e.target.value)} placeholder="예: 역삼동, 홍대입구, ○○로 12"/></label>{chosenExistingAddress===form.address&&form.address&&<p className="address-picked">✓ 기존 작업내역의 주소를 선택했습니다.</p>}{addressLookupState==='loading'&&<p className="muted">기존 주소 목록을 불러오는 중입니다...</p>}{addressLookupState==='error'&&<p className="address-error">주소 검색 준비가 필요합니다. Supabase에서 함께 제공한 SQL을 한 번 실행해 주세요. 지금은 주소를 직접 입력할 수 있습니다.</p>}{addressInputNormalized.length>=2&&addressLookupState==='ready'&&chosenExistingAddress!==form.address&&<div className="address-candidates"><strong>기존 작업내역의 주소 {matchingAddresses.length?'후보':'검색 결과'}</strong>{matchingAddresses.length?matchingAddresses.map(item=><button className="address-candidate" type="button" key={item.address} onClick={()=>chooseAddress(item.address)}>{item.address}</button>):<p className="address-empty">일치하는 주소가 없습니다. 신규 작업이라면 위 칸에 정확한 주소를 입력한 뒤 등록하세요.</p>}</div>}{photoMatches.length>0&&<div className="address-candidates photo-candidates"><strong>사진에서 찾은 유사 주소 (확인 후 선택)</strong>{photoMatches.map(item=><button className="address-candidate" type="button" key={item.address} onClick={()=>chooseAddress(item.address)}>{item.address}</button>)}<button type="button" onClick={()=>setPhotoMatches([])}>일치하는 주소 없음 · 신규 주소 직접 입력</button></div>}</div><div className="optional-photo"><span>2. 사진으로 주소 읽기 <small>(선택사항 · 한글 OCR은 시간이 걸릴 수 있음)</small></span><label className="camera"><Camera size={22}/>{photoBusy?'사진 분석 중...':'주소 사진 촬영 · 업로드'}<input type="file" accept="image/*" capture="environment" disabled={photoBusy} onChange={e=>{photo(e.target.files?.[0]);e.target.value=''}}/></label></div><div className="quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([k,label])=><div className="quantity" key={k}><span>{label}</span><div><button type="button" onClick={()=>setForm({...form,[k]:Math.max(0,form[k]-1)})}><Minus size={18}/></button><input className="quantity-input" type="number" min="0" step="1" inputMode="numeric" aria-label={`${label} 수량 직접 입력`} value={form[k]} onChange={e=>setForm(v=>({...v,[k]:e.target.value===""?0:Math.max(0,Math.floor(Number(e.target.value)||0))}))}/><button type="button" onClick={()=>setForm({...form,[k]:form[k]+1})}><Plus size={18}/></button></div></div>)}</div>{editing&&<><label>수정 사유<select value={reason} onChange={e=>setReason(e.target.value)}>{['주소지 수정','이불커버 수량 수정','수건 소 수량 수정','수건 대 수량 수정','전체 수정'].map(x=><option key={x}>{x}</option>)}</select></label><label>상세 수정 사유<textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="수정 이유를 입력하세요"/></label></>}<button className="primary" disabled={busy||photoBusy}>{busy||photoBusy?'처리 중...':editing?'수정 즉시 반영':'작업 수량 등록'}</button>{editing&&<button type="button" onClick={()=>{setEditing(null);setForm(empty());setChosenExistingAddress('');setPhotoMatches([])}}>수정 취소</button>}</form></section>}
 {['dashboard','entries','mine'].includes(tab)&&<><div className="toolbar"><div className="date-range"><div className="preset-buttons">{[['today','오늘'],['twoWeeks','최근 2주'],['month','최근 한 달']].map(([id,label])=><button key={id} type="button" className={preset===id?'selected-preset':''} onClick={()=>choosePreset(id)}>{label}</button>)}</div><label>시작일 <input type="date" value={startDate} max={endDate} onChange={e=>{setStartDate(e.target.value);setPreset('custom')}}/></label><label>종료일 <input type="date" value={endDate} min={startDate} onChange={e=>{setEndDate(e.target.value);setPreset('custom')}}/></label></div>{owner&&<><label>직원<select value={person} onChange={e=>setPerson(e.target.value)}><option value="all">전체 직원</option>{staff.filter(p=>p.approved).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>시간대<select value={shift} onChange={e=>setShift(e.target.value)}><option>전체</option><option>오전</option><option>오후</option></select></label><button onClick={exportXlsx}><Download size={16}/> 엑셀</button></>}<label>주소 검색<input type="search" value={addressSearch} onChange={e=>setAddressSearch(e.target.value)} placeholder="주소 일부 입력"/></label><button onClick={load}><RefreshCw size={16}/> 새로고침</button></div><div className="cards">{[['활동 직원',people(filtered)+'명'],['이불커버',total.duvet+'개'],['수건 소',total.small+'개'],['수건 대',total.large+'개'],['작업 건수',filtered.length+'건']].map(([k,v])=><div className="metric" key={k}><span>{k}</span><strong>{v}</strong></div>)}</div></>}
 {tab==='dashboard'&&<section className="panel"><h2>직원별 이불커버 · 근무일수</h2><p className="muted">선택한 기간의 등록 기록을 기준으로 집계합니다. 근무일수는 기록이 1건 이상 있는 날짜를 하루로 계산하며, 실제 출퇴근 기록과는 다를 수 있습니다.</p><div className="scroll"><table><thead><tr><th>직원</th><th>이불커버 합계</th><th>근무일수</th><th>작업 건수</th></tr></thead><tbody>{staffSummary.map(p=><tr key={p.id}><td>{p.name}</td><td>{p.duvet.toLocaleString('ko-KR')}개</td><td>{p.days.size}일</td><td>{p.count.toLocaleString('ko-KR')}건</td></tr>)}{!staffSummary.length&&<tr><td colSpan={4}>해당 기간의 등록 기록이 없습니다.</td></tr>}</tbody></table></div></section>}
 {tab==='entries'&&<>{billingPanel}<section className="panel"><h2>전체 작업 내역 <small>체크박스로 정산할 작업을 선택하세요.</small></h2>{entryTable(filtered,false,true)}</section></>}

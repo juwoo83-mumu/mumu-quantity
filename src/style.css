@@ -15,3 +15,21 @@
 
 /* Selected work entries and invoice calculator */
 .selected-entry{background:#edf7ef}.scroll input[type=checkbox]{width:18px;height:18px;accent-color:#174636;cursor:pointer}.billing-heading,.billing-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.billing-heading h2{margin-bottom:5px}.billing-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:18px 0}.billing-grid>div{padding:14px;background:#f3f8f4;border-radius:10px;display:grid;gap:5px}.billing-grid span,.billing-bottom span{font-size:12px;color:#697e70}.billing-grid strong{font-size:18px}.billing-grid small{color:#627f6a}.billing-bottom{padding-top:16px;border-top:1px solid #e3ebe5}.billing-bottom>div:first-child{display:grid;gap:4px}.billing-bottom strong{font-size:28px;color:#174636}.billing-actions{display:flex;gap:8px;flex-wrap:wrap}.billing-copy{background:#174636;color:white}.billing-preview{width:100%;min-height:140px;resize:vertical;margin-top:14px;border:1px solid #dce8df;border-radius:9px;padding:12px;background:#fafcfa;font:13px/1.6 system-ui;white-space:pre-wrap}@media(max-width:750px){.billing-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.billing-actions{width:100%}.billing-actions button{flex:1}}
+
+/* Quick address lookup (uses all historical addresses; no staff quantities exposed) */
+.address-entry-block{display:grid;gap:10px}
+.address-instruction{padding:13px;border-radius:11px;background:#eff6f0}
+.address-instruction strong{color:#194f34;font-size:14px}
+.address-instruction p{color:#6c8172;font-size:12px;margin:6px 0 0;line-height:1.55}
+.address-picked{color:#167044;font-size:13px;margin:0}
+.address-error{background:#fff6ea;color:#a25808;border-radius:8px;padding:10px;font-size:12px;margin:0}
+.address-candidates{border:1px solid #d5e4d7;border-radius:10px;padding:10px;display:grid;gap:6px;max-height:280px;overflow:auto}
+.address-candidates>strong{font-size:13px;color:#2f5b3c;margin:0 0 3px}
+.address-candidate{justify-content:flex-start;text-align:left;padding:11px;background:#f5f9f5;color:#234f33;white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.address-candidate:hover,.address-candidate:focus-visible{background:#e1efe3}
+.address-empty{font-size:13px;color:#7a826d;line-height:1.55;margin:3px 0}
+.optional-photo{display:grid;gap:8px}
+.optional-photo>span{font-size:14px;font-weight:600}
+.optional-photo small{font-weight:400;color:#7a8c80;font-size:12px}
+.optional-photo .camera{padding:14px;background:white;border-color:#d4e0d5}
+@media(max-width:750px){.address-candidates{max-height:230px}}
