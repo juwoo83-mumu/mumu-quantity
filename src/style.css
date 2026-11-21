@@ -36,3 +36,14 @@
 
 /* 이불커버 수량 집계 기준 설명 */
 .duvet-description{display:block;font-size:12px;font-weight:400;line-height:1.5;color:#53685c;margin-top:7px}
+
+/* 수량 등록 안에서 주소 검색 / 사진 OCR 전환 */
+.address-method-switch{display:grid;grid-template-columns:1fr 1fr;gap:7px;background:#f2f6f3;padding:6px;border-radius:12px}
+.address-method-switch button{background:transparent;color:#536d59;border:1px solid transparent;padding:12px 8px;font-size:13px;line-height:1.4;min-height:44px}
+.address-method-switch button.active{background:#174636;color:#fff;font-weight:700;box-shadow:0 2px 7px #173c2630}
+.address-method-switch button:focus-visible{outline:2px solid #44775a;outline-offset:2px}
+.address-method-content{display:grid;gap:11px;padding-top:4px}
+.photo-within-entry .camera{min-height:95px}
+.photo-within-entry .photo-candidates{max-height:300px}
+.photo-confirm{background:#e5f1e8;color:#20563a;font-weight:700;min-height:44px}
+@media(max-width:420px){.address-method-switch button{font-size:12px;padding:11px 5px}}
