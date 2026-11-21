@@ -9,9 +9,10 @@ const url=import.meta.env.VITE_SUPABASE_URL,key=import.meta.env.VITE_SUPABASE_AN
 const db=url&&key?createClient(url,key):null;
 const empty=()=>({address:'',duvet:0,small:0,large:0});
 // 주소 사진을 꼭 찍을 필요 없이, 2글자 이상 입력하면 기존 주소를 기기에서 즉시 검색합니다.
-const normalizedAddress=s=>String(s||'').toLowerCase().replace(/[^가-힣a-z0-9]/g,'');
-// 공백을 모두 제거했을 때 글자가 완전히 같은 주소는 검색 목록에 한 번만 표시합니다.
-const spaceFreeAddress=s=>String(s||'').normalize('NFC').replace(/\s+/gu,'');
+// 공백·특수기호가 달라도 실제 글자와 숫자 순서가 같으면 동일한 주소로 판단합니다.
+// 예: '서울 강남구 123-4', '서울강남구123_4' -> 같은 주소
+const normalizedAddress=s=>String(s||'').normalize('NFC').toLowerCase().replace(/[^가-힣a-z0-9]/g,'');
+const spaceFreeAddress=normalizedAddress;
 function uniqueAddresses(addresses){
  const seen=new Set();
  return addresses.filter(address=>{
