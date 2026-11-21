@@ -13,10 +13,20 @@ const empty=()=>({address:'',duvet:0,small:0,large:0});
 // 예: '서울 강남구 123-4', '서울강남구123_4' -> 같은 주소
 const normalizedAddress=s=>String(s||'').normalize('NFC').toLowerCase().replace(/[^가-힣a-z0-9]/g,'');
 const spaceFreeAddress=normalizedAddress;
+// 주소 앞이나 뒤에 관리용 표기 '수정'이 붙어 있는 과거 주소는 후보에서 제외합니다.
+// 앞에 띄어쓰기/특수기호가 있거나 '수정서울...'처럼 붙어 있어도 제외합니다.
+// 단, '수정구', '수정동' 등 지명으로 시작하는 주소와 '성남시 수정구'는 유지합니다.
+const hasEditMarker=address=>{
+ const value=String(address||'').normalize('NFC').trim();
+ const beginning=value.replace(/^[^가-힣a-z0-9]*/i,'');
+ const prefix=/^수정(?:(?!구|동|로|길|리|면|읍|군|시)[가-힣a-z0-9]|[^가-힣a-z0-9])/i.test(beginning);
+ const suffix=/수정[^가-힣a-z0-9]*$/i.test(value);
+ return prefix||suffix;
+};
 function uniqueAddresses(addresses){
  const seen=new Set();
  return addresses.filter(address=>{
-  if(!address||!String(address).trim())return false;
+  if(!address||!String(address).trim()||hasEditMarker(address))return false;
   const key=spaceFreeAddress(address);
   if(seen.has(key))return false;
   seen.add(key);
