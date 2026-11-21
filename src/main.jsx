@@ -26,8 +26,8 @@ const hasEditMarker=address=>{
 function uniqueAddresses(addresses){
  const seen=new Set();
  return addresses.filter(address=>{
-  if(!address||!String(address).trim()||hasEditMarker(address))return false;
   const key=spaceFreeAddress(address);
+  if(key.length<2||hasEditMarker(address))return false;
   if(seen.has(key))return false;
   seen.add(key);
   return true;
