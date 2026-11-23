@@ -98,3 +98,10 @@
 .owner-address-search input{flex:1;min-width:210px;padding:10px 12px;border:1px solid #cbdcd0;border-radius:9px;background:white}
 .owner-address-search .muted{white-space:nowrap}
 @media(max-width:750px){.owner-address-search input{flex-basis:100%;min-width:0}.billing-balance .balance-input-row{max-width:none}}
+
+
+/* 사업주 작업내역 주소 수정 */
+.owner-edit-address{display:grid;gap:8px;font-size:14px;font-weight:700;margin-bottom:16px;color:#244a35}
+.owner-edit-address input{display:block;width:100%;padding:12px 13px;border:1px solid #cbdcd0;border-radius:9px;background:#fff;font-size:15px;color:#143c27}
+.owner-edit-address input:focus{outline:2px solid #73aa87;outline-offset:1px}
+.owner-edit-address small{font-size:12px;font-weight:400;color:#6b8072;overflow-wrap:anywhere}
