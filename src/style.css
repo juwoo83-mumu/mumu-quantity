@@ -105,3 +105,23 @@
 .owner-edit-address input{display:block;width:100%;padding:12px 13px;border:1px solid #cbdcd0;border-radius:9px;background:#fff;font-size:15px;color:#143c27}
 .owner-edit-address input:focus{outline:2px solid #73aa87;outline-offset:1px}
 .owner-edit-address small{font-size:12px;font-weight:400;color:#6b8072;overflow-wrap:anywhere}
+
+
+/* Work registration: employee checks the exact address and quantities before insert. */
+.entry-confirm-dialog{width:min(94vw,490px);max-height:min(85dvh,760px);overflow-y:auto;border:1px solid #d4e4d9;border-radius:18px;padding:0;box-shadow:0 18px 60px #0e2c1d55;color:#20332b;background:#fff}
+.entry-confirm-dialog::backdrop{background:rgba(17,38,26,.58)}
+.entry-confirm-content{padding:24px;display:grid;gap:15px}
+.entry-confirm-badge{justify-self:start;padding:5px 10px;border-radius:50px;background:#e6f1e9;color:#23543a;font-size:12px;font-weight:700}
+.entry-confirm-content h2{font-size:23px;line-height:1.4;margin:0}
+.entry-confirm-explanation{font-size:14px;color:#536a5c;line-height:1.7;margin:0}
+.entry-confirm-details{display:grid;gap:8px;margin:0}
+.entry-confirm-details>div{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:12px 14px;background:#f4f8f5;border-radius:9px}
+.entry-confirm-details>div.entry-confirm-address{display:grid;gap:7px}
+.entry-confirm-details dt{font-size:14px;color:#677b6d;white-space:nowrap}
+.entry-confirm-details dd{font-weight:750;margin:0;text-align:right;font-size:17px;overflow-wrap:anywhere}
+.entry-confirm-details .entry-confirm-address dd{text-align:left;font-size:16px}
+.entry-confirm-error{margin:0;color:#af3329;background:#fff0ee;border-radius:9px;padding:12px;font-size:13px}
+.entry-confirm-actions{display:flex;gap:10px;margin-top:5px}
+.entry-confirm-actions button{flex:1;min-height:48px;padding:12px 9px;font-weight:700}
+.entry-confirm-actions .entry-confirm-submit{background:#174636;color:#fff}
+@media(max-width:420px){.entry-confirm-content{padding:19px}.entry-confirm-actions{flex-direction:column-reverse}.entry-confirm-content h2{font-size:20px}}

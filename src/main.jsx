@@ -1,5 +1,5 @@
 
-import React,{useEffect,useMemo,useState} from 'react';
+import React,{useEffect,useMemo,useState,useRef} from 'react';
 import{createRoot}from'react-dom/client';
 import{createClient}from'@supabase/supabase-js';
 import{Camera,LayoutDashboard,ClipboardList,History,Users,LogOut,Plus,Minus,Download,RefreshCw,Search}from'lucide-react';
@@ -13,6 +13,28 @@ const empty=()=>({address:'',duvet:0,small:0,large:0});
 // 예: '서울 강남구 123-4', '서울강남구123_4' -> 같은 주소
 const normalizedAddress=s=>String(s||'').normalize('NFC').toLowerCase().replace(/[^가-힣a-z0-9]/g,'');
 const spaceFreeAddress=normalizedAddress;
+// 공백으로 구분된 단어를 특수기호 없이 비교합니다. 순서는 무시하지만 중복 단어의 개수까지 유지합니다.
+// 예: '서울 강남구 역삼동 123-4' === '123_4 역삼동 강남구 서울'
+const addressWords=address=>String(address||'').normalize('NFC').toLowerCase().trim()
+ .split(/\s+/).map(word=>word.replace(/[^가-힣a-z0-9]/g,'')).filter(Boolean);
+const addressWordsKey=address=>addressWords(address).sort().join('\u001f');
+const sameAddress=(a,b)=>{
+ const compactA=normalizedAddress(a),compactB=normalizedAddress(b);
+ return compactA.length>=2&&compactB.length>=2&&
+  (compactA===compactB||addressWordsKey(a)===addressWordsKey(b));
+};
+// 일부 단어만 입력해도 입력 순서와 관계없이 후보를 찾습니다. 이 경우 중복 판단은 하지 않습니다.
+function hasWordsInAnyOrder(query,known){
+ const words=addressWords(query),target=addressWords(known);
+ if(words.length<2||words.length>target.length)return false;
+ const remaining=[...target];
+ for(const word of words){
+  const idx=remaining.findIndex(item=>item.includes(word));
+  if(idx<0)return false;
+  remaining.splice(idx,1);
+ }
+ return true;
+}
 // 주소 앞이나 뒤에 관리용 표기 '수정'이 붙어 있는 과거 주소는 후보에서 제외합니다.
 // 앞에 띄어쓰기/특수기호가 있거나 '수정서울...'처럼 붙어 있어도 제외합니다.
 // 단, '수정구', '수정동' 등 지명으로 시작하는 주소와 '성남시 수정구'는 유지합니다.
@@ -24,12 +46,14 @@ const hasEditMarker=address=>{
  return prefix||suffix;
 };
 function uniqueAddresses(addresses){
- const seen=new Set();
+ const seenCompact=new Set(),seenWords=new Set();
  return addresses.filter(address=>{
-  const key=spaceFreeAddress(address);
-  if(key.length<2||hasEditMarker(address))return false;
-  if(seen.has(key))return false;
-  seen.add(key);
+  const compact=spaceFreeAddress(address),words=addressWordsKey(address);
+  if(compact.length<2||hasEditMarker(address))return false;
+  // 공백·기호만 달라도 같고, 단어의 종류·개수가 같은 채 순서만 달라도 같습니다.
+  if(seenCompact.has(compact)||seenWords.has(words))return false;
+  seenCompact.add(compact);
+  seenWords.add(words);
   return true;
  });
 }
@@ -37,7 +61,7 @@ const addressBigrams=s=>{const out=new Set();for(let i=0;i<s.length-1;i++)out.ad
 function photoAddressScore(ocrLine,known){
  const a=normalizedAddress(ocrLine),b=normalizedAddress(known);
  if(a.length<3||b.length<3)return 0;
- if(a===b)return 1000;
+ if(sameAddress(ocrLine,known))return 1000;
  if(b.includes(a))return 850+Math.min(a.length,80);
  if(a.includes(b))return 830+Math.min(b.length,80);
  const A=addressBigrams(a),B=addressBigrams(b);let common=0;
@@ -75,10 +99,22 @@ const[addressMethod,setAddressMethod]=useState('search'),[form,setForm]=useState
 const[knownAddresses,setKnownAddresses]=useState([]),[addressLookupState,setAddressLookupState]=useState('idle'),[chosenExistingAddress,setChosenExistingAddress]=useState(''),[photoMatches,setPhotoMatches]=useState([]),[photoBusy,setPhotoBusy]=useState(false);
 const[selectedIds,setSelectedIds]=useState([]),[copyNotice,setCopyNotice]=useState(''),[existingBalanceInput,setExistingBalanceInput]=useState('');
 const[ownerEditing,setOwnerEditing]=useState(null),[ownerEditForm,setOwnerEditForm]=useState({address:'',duvet:0,small:0,large:0}),[ownerEditNote,setOwnerEditNote]=useState(''),[ownerEditError,setOwnerEditError]=useState(''),[ownerEditSaving,setOwnerEditSaving]=useState(false);
+const[pendingEntry,setPendingEntry]=useState(null),[confirmError,setConfirmError]=useState('');
+const confirmDialogRef=useRef(null);
+const registerInFlightRef=useRef(false);
 const[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[authMode,setAuthMode]=useState('login'),[email,setEmail]=useState(''),[pass,setPass]=useState(''),[confirmPass,setConfirmPass]=useState(''),[name,setName]=useState('');
 useEffect(()=>{if(!db){setReady(true);return}db.auth.getSession().then(({data})=>{setSession(data.session);setReady(true)});const{data:{subscription}}=db.auth.onAuthStateChange((_event,s)=>setSession(s));return()=>subscription.unsubscribe()},[]);
 useEffect(()=>{if(!session){setProfile(null);return}db.from('profiles').select('*').eq('id',session.user.id).single().then(({data,error})=>{setProfile(data);if(error)setNotice(error.message)})},[session]);
 const owner=profile?.role==='owner';
+// Only show the review dialog after the form has passed validation. Nothing is saved until confirmation.
+useEffect(()=>{
+ const dialog=confirmDialogRef.current;
+ if(!dialog)return;
+ if(pendingEntry&&!dialog.open)dialog.showModal();
+ if(!pendingEntry&&dialog.open)dialog.close();
+},[pendingEntry]);
+useEffect(()=>{if(tab!=='entry')setPendingEntry(null)},[tab]);
+
 // 기존 업무자료 전체에서 '주소 텍스트만' 조회합니다. 직원은 다른 사람의 수량/이력은 볼 수 없습니다.
 useEffect(()=>{
  if(!db||!profile?.approved||tab!=='entry')return;
@@ -98,9 +134,10 @@ const matchingAddresses=useMemo(()=>{
  return knownAddresses.map(address=>{
   const known=normalizedAddress(address);
   let rank=0;
-  if(known===addressInputNormalized)rank=1000;
+  if(sameAddress(address,form.address))rank=1000;
   else if(known.startsWith(addressInputNormalized))rank=900;
   else if(known.includes(addressInputNormalized))rank=800;
+  else if(hasWordsInAnyOrder(form.address,address))rank=750;
   else if(addressInputNormalized.length>=5&&addressInputNormalized.includes(known))rank=700;
   return {address,rank};
  }).filter(x=>x.rank>0).sort((a,b)=>b.rank-a.rank||a.address.localeCompare(b.address,'ko')).slice(0,10);
@@ -248,12 +285,50 @@ async function photo(file){
  }catch(error){setNotice('사진 인식에 실패했습니다. 위의 주소 검색·직접 입력을 선택해 기존 주소를 검색해 주세요.');}
  finally{setPhotoBusy(false)}
 }
-async function save(e){e.preventDefault();if([...form.address.trim()].length<2){setNotice('주소지는 2글자 이상 입력해 주세요.');return}setBusy(true);
-const clean={address:form.address.trim(),duvet:Number(form.duvet),small:Number(form.small),large:Number(form.large)};
-let error;if(editing){({error}=await db.rpc('revise_entry',{p_id:editing.id,p_address:clean.address,p_duvet:clean.duvet,p_small:clean.small,p_large:clean.large,p_reason:reason,p_note:note}))}
-else{({error}=await db.from('entries').insert({...clean,employee_id:session.user.id}))}
-setBusy(false);if(error){setNotice(error.message);return}setNotice(editing?'수정 내용이 반영되고 이전 수량이 이력에 보존되었습니다.':'수량이 등록되었습니다.');setEditing(null);setForm(empty());setNote('');setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search');
-setKnownAddresses(old=>uniqueAddresses([clean.address,...old]).slice(0,10000));await load()}
+async function save(e){
+ e.preventDefault();
+ if(busy||pendingEntry)return;
+ const address=String(form.address||'').trim();
+ if(normalizedAddress(address).length<2){setNotice('주소지는 공백과 특수기호를 제외하고 2글자 이상 입력해 주세요.');return}
+ const clean={address};
+ for(const key of ['duvet','small','large']){
+  const raw=form[key];
+  if(raw===''||!Number.isInteger(Number(raw))||Number(raw)<0||Number(raw)>2147483647){
+   setNotice('수량은 0 이상의 정수로 입력해 주세요.');return;
+  }
+  clean[key]=Number(raw);
+ }
+ setNotice('');
+ if(!editing){
+  setConfirmError('');
+  setPendingEntry(clean);
+  return;
+ }
+ setBusy(true);
+ const {error}=await db.rpc('revise_entry',{p_id:editing.id,p_address:clean.address,p_duvet:clean.duvet,p_small:clean.small,p_large:clean.large,p_reason:reason,p_note:note});
+ setBusy(false);
+ if(error){setNotice(error.message);return}
+ setNotice('수정 내용이 반영되고 이전 수량이 이력에 보존되었습니다.');
+ setEditing(null);setForm(empty());setNote('');setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search');
+ setKnownAddresses(old=>uniqueAddresses([clean.address,...old]).slice(0,10000));await load();
+}
+async function confirmNewEntry(){
+ if(!pendingEntry||busy||registerInFlightRef.current||!session?.user?.id)return;
+ registerInFlightRef.current=true;
+ // Use the reviewed snapshot rather than the editable form to prevent mismatched submissions.
+ const clean={...pendingEntry};
+ setBusy(true);setConfirmError('');
+ try{
+  const {error}=await db.from('entries').insert({...clean,employee_id:session.user.id});
+  if(error)throw error;
+  setPendingEntry(null);
+  setNotice('확인하신 주소와 수량으로 작업내역이 등록되었습니다.');
+  setForm(empty());setNote('');setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search');
+  setKnownAddresses(old=>uniqueAddresses([clean.address,...old]).slice(0,10000));
+  await load();
+ }catch(error){setConfirmError(error.message||'등록에 실패했습니다. 다시 확인해 주세요.');}
+ finally{registerInFlightRef.current=false;setBusy(false);}
+}
 function startEdit(r){setAddressMethod('search');setChosenExistingAddress(r.address);setPhotoMatches([]);setEditing(r);setForm({address:r.address,duvet:r.duvet,small:r.small,large:r.large});setReason('주소지 수정');setNote('');setTab('entry');window.scrollTo({top:0,behavior:'smooth'})}
 async function approve(p){const{error}=await db.from('profiles').update({approved:!p.approved}).eq('id',p.id);if(error)setNotice(error.message);else load()}
 function exportXlsx(){const records=filtered.map(r=>({등록시간:time(r),시간대:period(r),직원:names[r.employee_id]||r.employee_id,주소:r.address,이불커버:r.duvet,'수건 소':r.small,'수건 대':r.large}));const sheet=XLSX.utils.json_to_sheet(records),book=XLSX.utils.book_new();XLSX.utils.book_append_sheet(book,sheet,'작업내역');XLSX.writeFile(book,`무무베딩_${startDate}_${endDate}.xlsx`)}
@@ -289,7 +364,7 @@ return <div className="shell"><header><div><div className="brand">MUMU BEDDING</
   <label>사진 인식 결과 또는 신규 주소 (2글자 이상)<input autoComplete="off" required minLength={2} value={form.address} onChange={e=>editAddress(e.target.value)} placeholder="인식한 주소를 확인하거나 직접 입력하세요"/></label>
   <button type="button" className="photo-confirm" disabled={photoBusy||normalizedAddress(form.address).length<2} onClick={()=>{setAddressMethod('search');setNotice('주소를 확인한 뒤 수량을 입력해 주세요.')}}>주소 확인 · 수량 입력하기</button>
  </div>}
- </div><div className="quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([k,label])=><div className="quantity" key={k}><span>{label}</span>{k==='duvet'&&<small className="duvet-description">큰 것은 모두 이불로 세며, 다리지 않은 것도 포함합니다.</small>}<div><button type="button" onClick={()=>setForm(v=>({...v,[k]:Math.max(0,(Number(v[k])||0)-1)}))}><Minus size={18}/></button><input className="quantity-input" type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="off" onFocus={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} onClick={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} aria-label={`${label} 수량 직접 입력`} value={form[k]} onChange={e=>setForm(v=>({...v,[k]:e.target.value===""?"":e.target.value.replace(/\D/g,"")}))} onBlur={()=>setForm(v=>({...v,[k]:v[k]===""?0:v[k]}))}/><button type="button" onClick={()=>setForm(v=>({...v,[k]:(Number(v[k])||0)+1}))}><Plus size={18}/></button></div></div>)}</div>{editing&&<><label>수정 사유<select value={reason} onChange={e=>setReason(e.target.value)}>{['주소지 수정','이불커버 수량 수정','수건 소 수량 수정','수건 대 수량 수정','전체 수정'].map(x=><option key={x}>{x}</option>)}</select></label><label>상세 수정 사유<textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="수정 이유를 입력하세요"/></label></>}<button className="primary" disabled={busy||photoBusy}>{busy||photoBusy?'처리 중...':editing?'수정 즉시 반영':'작업 수량 등록'}</button>{editing&&<button type="button" onClick={()=>{setEditing(null);setForm(empty());setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search')}}>수정 취소</button>}</form></section>}
+ </div><div className="quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([k,label])=><div className="quantity" key={k}><span>{label}</span>{k==='duvet'&&<small className="duvet-description">큰 것은 모두 이불로 세며, 다리지 않은 것도 포함합니다.</small>}<div><button type="button" onClick={()=>setForm(v=>({...v,[k]:Math.max(0,(Number(v[k])||0)-1)}))}><Minus size={18}/></button><input className="quantity-input" type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="off" onFocus={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} onClick={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} aria-label={`${label} 수량 직접 입력`} value={form[k]} onChange={e=>setForm(v=>({...v,[k]:e.target.value===""?"":e.target.value.replace(/\D/g,"")}))} onBlur={()=>setForm(v=>({...v,[k]:v[k]===""?0:v[k]}))}/><button type="button" onClick={()=>setForm(v=>({...v,[k]:(Number(v[k])||0)+1}))}><Plus size={18}/></button></div></div>)}</div>{editing&&<><label>수정 사유<select value={reason} onChange={e=>setReason(e.target.value)}>{['주소지 수정','이불커버 수량 수정','수건 소 수량 수정','수건 대 수량 수정','전체 수정'].map(x=><option key={x}>{x}</option>)}</select></label><label>상세 수정 사유<textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="수정 이유를 입력하세요"/></label></>}<button className="primary" disabled={busy||photoBusy}>{busy||photoBusy?'처리 중...':editing?'수정 즉시 반영':'주소·수량 확인하기'}</button>{editing&&<button type="button" onClick={()=>{setEditing(null);setForm(empty());setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search')}}>수정 취소</button>}</form><dialog ref={confirmDialogRef} className="entry-confirm-dialog" aria-labelledby="entry-confirm-title" onCancel={e=>{if(busy)e.preventDefault();else setPendingEntry(null)}} onClose={()=>{if(!busy)setPendingEntry(null)}}>{pendingEntry&&<div className="entry-confirm-content"><div className="entry-confirm-badge">등록 전 확인</div><h2 id="entry-confirm-title">주소와 수량이 맞나요?</h2><p className="entry-confirm-explanation">다시 한번 확인한 뒤 <b>확인 후 등록</b>을 눌러야 작업내역이 저장됩니다.</p><dl className="entry-confirm-details"><div className="entry-confirm-address"><dt>주소지</dt><dd>{pendingEntry.address}</dd></div><div><dt>이불커버</dt><dd>{pendingEntry.duvet.toLocaleString('ko-KR')}개</dd></div><div><dt>수건 소</dt><dd>{pendingEntry.small.toLocaleString('ko-KR')}개</dd></div><div><dt>수건 대</dt><dd>{pendingEntry.large.toLocaleString('ko-KR')}개</dd></div></dl>{confirmError&&<p className="entry-confirm-error" role="alert">{confirmError}</p>}<div className="entry-confirm-actions"><button type="button" autoFocus disabled={busy} onClick={()=>{setPendingEntry(null);setConfirmError('')}}>돌아가서 수정</button><button type="button" className="entry-confirm-submit" disabled={busy} onClick={confirmNewEntry}>{busy?'등록 중...':'확인 후 등록'}</button></div></div>}</dialog></section>}
 {['dashboard','entries','mine'].includes(tab)&&<><div className="toolbar"><div className="date-range"><div className="preset-buttons">{[['today','오늘'],['twoWeeks','최근 2주'],['month','최근 한 달']].map(([id,label])=><button key={id} type="button" className={preset===id?'selected-preset':''} onClick={()=>choosePreset(id)}>{label}</button>)}</div><label>시작일 <input type="date" value={startDate} max={endDate} onChange={e=>{setStartDate(e.target.value);setPreset('custom')}}/></label><label>종료일 <input type="date" value={endDate} min={startDate} onChange={e=>{setEndDate(e.target.value);setPreset('custom')}}/></label></div>{owner&&<><label>직원<select value={person} onChange={e=>setPerson(e.target.value)}><option value="all">전체 직원</option>{staff.filter(p=>p.approved).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>시간대<select value={shift} onChange={e=>setShift(e.target.value)}><option>전체</option><option>오전</option><option>오후</option></select></label><button onClick={exportXlsx}><Download size={16}/> 엑셀</button></>}<button onClick={load}><RefreshCw size={16}/> 새로고침</button></div><div className="cards">{[['활동 직원',people(filtered)+'명'],['이불커버',total.duvet+'개'],['수건 소',total.small+'개'],['수건 대',total.large+'개'],['작업 건수',filtered.length+'건']].map(([k,v])=><div className="metric" key={k}><span>{k}</span><strong>{v}</strong></div>)}</div></>}
 {tab==='dashboard'&&<section className="panel"><h2>직원별 이불커버 · 근무일수</h2><p className="muted">선택한 기간의 등록 기록을 기준으로 집계합니다. 근무일수는 기록이 1건 이상 있는 날짜를 하루로 계산하며, 실제 출퇴근 기록과는 다를 수 있습니다.</p><div className="scroll"><table><thead><tr><th>직원</th><th>이불커버 합계</th><th>근무일수</th><th>작업 건수</th></tr></thead><tbody>{staffSummary.map(p=><tr key={p.id}><td>{p.name}</td><td>{p.duvet.toLocaleString('ko-KR')}개</td><td>{p.days.size}일</td><td>{p.count.toLocaleString('ko-KR')}건</td></tr>)}{!staffSummary.length&&<tr><td colSpan={4}>해당 기간의 등록 기록이 없습니다.</td></tr>}</tbody></table></div></section>}
 {tab==='entries'&&<>{billingPanel}{ownerEditPanel}<section className="panel"><div className="owner-list-heading"><div><h2>전체 작업 내역</h2><p className="muted">체크박스로 정산할 작업을 선택하세요. 주소·수량 수정은 한 건만 선택하거나 해당 행의 ‘수정’ 버튼을 누르세요.</p></div><button type="button" className="owner-edit-selected" disabled={selectedRows.length!==1||ownerEditSaving} onClick={editSelectedOwnerEntry}>선택한 1건 주소·수량 수정</button></div><div className="owner-address-search"><label htmlFor="owner-entry-address-search"><Search size={16}/> 주소 검색</label><input id="owner-entry-address-search" type="search" value={addressSearch} onChange={e=>setAddressSearch(e.target.value)} placeholder="주소 일부를 입력해 작업내역 검색"/><span className="muted">{filtered.length.toLocaleString('ko-KR')}건 표시</span></div>{entryTable(filtered,true,true)}</section></>}
