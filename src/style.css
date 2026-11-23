@@ -87,3 +87,14 @@
 .owner-edit-actions{display:flex;gap:10px;margin-top:14px}
 .owner-edit-error{color:#b23527;background:#fff1ef;border-radius:8px;padding:10px;font-size:13px}
 @media(max-width:700px){.owner-edit-context,.owner-edit-quantities{grid-template-columns:1fr}.owner-edit-quantities>label{gap:6px}.owner-edit-counter input{max-width:180px}.owner-list-heading>button{width:100%}.owner-edit-actions button{flex:1}}
+
+/* Owner billing: signed balances (including negative values) */
+.billing-balance .balance-input-row{display:flex;align-items:stretch;gap:8px;max-width:340px;width:100%}
+.billing-balance .balance-input-row input{min-width:0;max-width:none;flex:1}
+.billing-balance .balance-sign-toggle{flex:0 0 auto;min-width:56px;padding:0 11px;border:1px solid #bfd5c5;background:#eaf3ec;font-weight:700;font-size:14px}
+/* Keep owner address search next to the table it filters */
+.owner-address-search{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 16px;padding:12px 14px;background:#f7faf7;border:1px solid #e1eae3;border-radius:11px}
+.owner-address-search label{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#264a36}
+.owner-address-search input{flex:1;min-width:210px;padding:10px 12px;border:1px solid #cbdcd0;border-radius:9px;background:white}
+.owner-address-search .muted{white-space:nowrap}
+@media(max-width:750px){.owner-address-search input{flex-basis:100%;min-width:0}.billing-balance .balance-input-row{max-width:none}}
