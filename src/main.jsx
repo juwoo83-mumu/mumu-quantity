@@ -93,7 +93,7 @@ const people=rows=>new Set(rows.map(x=>x.employee_id)).size;
 const workDateKST=r=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(r.created_at));
 function App(){
 const[session,setSession]=useState(null),[ready,setReady]=useState(false),[profile,setProfile]=useState(null),[tab,setTab]=useState('entry');
-const[rows,setRows]=useState([]),[changes,setChanges]=useState([]),[staff,setStaff]=useState([]);
+const[rows,setRows]=useState([]),[changes,setChanges]=useState([]),[staff,setStaff]=useState([]),[staffEmails,setStaffEmails]=useState({}),[staffEmailError,setStaffEmailError]=useState('');
 const[startDate,setStartDate]=useState(dateKST()),[endDate,setEndDate]=useState(dateKST()),[preset,setPreset]=useState('today'),[person,setPerson]=useState('all'),[shift,setShift]=useState('전체'),[addressSearch,setAddressSearch]=useState('');
 const[addressMethod,setAddressMethod]=useState('search'),[form,setForm]=useState(empty()),[editing,setEditing]=useState(null),[reason,setReason]=useState('주소지 수정'),[note,setNote]=useState('');
 const[knownAddresses,setKnownAddresses]=useState([]),[addressLookupState,setAddressLookupState]=useState('idle'),[chosenExistingAddress,setChosenExistingAddress]=useState(''),[photoMatches,setPhotoMatches]=useState([]),[photoBusy,setPhotoBusy]=useState(false);
@@ -103,7 +103,25 @@ const[pendingEntry,setPendingEntry]=useState(null),[confirmError,setConfirmError
 const confirmDialogRef=useRef(null);
 const registerInFlightRef=useRef(false);
 const[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[authMode,setAuthMode]=useState('login'),[email,setEmail]=useState(''),[pass,setPass]=useState(''),[confirmPass,setConfirmPass]=useState(''),[name,setName]=useState('');
-useEffect(()=>{if(!db){setReady(true);return}db.auth.getSession().then(({data})=>{setSession(data.session);setReady(true)});const{data:{subscription}}=db.auth.onAuthStateChange((_event,s)=>setSession(s));return()=>subscription.unsubscribe()},[]);
+const[recoveryRoute,setRecoveryRoute]=useState(()=>window.location.pathname==='/reset-password');
+const[recoveryPass,setRecoveryPass]=useState(''),[recoveryConfirm,setRecoveryConfirm]=useState(''),[recoveryError,setRecoveryError]=useState('');
+const recoveryUrlError=new URLSearchParams(window.location.hash.replace(/^#/, '')).get('error_description')||new URLSearchParams(window.location.search).get('error_description');
+useEffect(()=>{
+ if(!db){setReady(true);return}
+ let active=true;
+ // Subscribe before reading the initial session: recovery redirects may emit PASSWORD_RECOVERY.
+ const{data:{subscription}}=db.auth.onAuthStateChange((event,s)=>{
+  if(!active)return;
+  setSession(s);
+  if(event==='PASSWORD_RECOVERY')setRecoveryRoute(true);
+ });
+ db.auth.getSession().then(({data,error})=>{
+  if(!active)return;
+  if(!error)setSession(data.session);
+  setReady(true);
+ }).catch(()=>{if(active)setReady(true)});
+ return()=>{active=false;subscription.unsubscribe()};
+},[]);
 useEffect(()=>{if(!session){setProfile(null);return}db.from('profiles').select('*').eq('id',session.user.id).single().then(({data,error})=>{setProfile(data);if(error)setNotice(error.message)})},[session]);
 const owner=profile?.role==='owner';
 // Only show the review dialog after the form has passed validation. Nothing is saved until confirmation.
@@ -156,14 +174,22 @@ function editAddress(value){
 async function load(){if(!profile?.approved)return;setBusy(true);
 if(!startDate||!endDate||startDate>endDate){setNotice('조회 시작일은 종료일보다 늦을 수 없습니다.');setBusy(false);return}
 const from=startDate+'T00:00:00+09:00',to=new Date(new Date(endDate+'T00:00:00+09:00').getTime()+86400000).toISOString();
-const[a,b,c]=await Promise.all([
+const[a,b,c,d]=await Promise.all([
  fetchEntries(from,to),
  db.from('changes').select('*').order('created_at',{ascending:false}).limit(1000),
- owner?db.from('profiles').select('*').order('name'):Promise.resolve({data:[]})
+ owner?db.from('profiles').select('*').order('name'):Promise.resolve({data:[]}),
+ owner?db.rpc('owner_list_staff_emails'):Promise.resolve({data:[]})
 ]);
 if(a.error)setNotice(a.error.message);else setRows(a.data||[]);
 if(b.error)setNotice(b.error.message);else setChanges(b.data||[]);
 if(c.error)setNotice(c.error.message);else setStaff(c.data||[]);
+if(d.error){
+ setStaffEmails({});
+ setStaffEmailError('이메일 목록을 불러오지 못했습니다. STAFF_EMAIL_SETUP.sql을 Supabase SQL Editor에서 한 번 실행해 주세요.');
+}else{
+ setStaffEmails(Object.fromEntries((d.data||[]).map(u=>[u.profile_id,u.email])));
+ setStaffEmailError('');
+}
 setBusy(false)}
 useEffect(()=>{setSelectedIds([]);setExistingBalanceInput('');setCopyNotice('');setOwnerEditing(null);if(profile?.approved)load()},[profile,startDate,endDate]);
 useEffect(()=>{setOwnerEditing(null)},[person,shift,addressSearch]);
@@ -259,6 +285,42 @@ const staffSummary=Object.values(filtered.reduce((acc,r)=>{
  return acc;
 },{})).sort((a,b)=>b.duvet-a.duvet||a.name.localeCompare(b.name,'ko'));
 async function login(e){e.preventDefault();setNotice('');if(authMode==='signup'&&(pass.length<8||pass!==confirmPass)){setNotice(pass.length<8?'비밀번호는 8자 이상 입력해 주세요.':'비밀번호 확인이 일치하지 않습니다.');return}setBusy(true);const{error}=authMode==='signup'?await db.auth.signUp({email,password:pass,options:{data:{name}}}):await db.auth.signInWithPassword({email,password:pass});setBusy(false);setNotice(error?error.message:authMode==='signup'?'가입 신청이 접수되었습니다. 이메일 인증 후 사업주 승인을 기다려 주세요.':'')}
+async function requestPasswordReset(event){
+ event.preventDefault();
+ if(busy)return;
+ setNotice('');setBusy(true);
+ try{
+  const {error}=await db.auth.resetPasswordForEmail(email.trim(),{
+   redirectTo:`${window.location.origin}/reset-password`
+  });
+  if(error)throw error;
+  setNotice('가입된 이메일이라면 비밀번호 재설정 링크가 발송됩니다. 받은편지함과 스팸함을 확인해 주세요.');
+ }catch(error){
+  const msg=String(error?.message||'');
+  setNotice(/rate limit|too many|429/i.test(msg)?'이메일 발송 한도를 초과했습니다. 잠시 후 다시 시도하거나 관리자에게 이메일 발송 설정을 확인해 달라고 요청해 주세요.':`재설정 이메일 발송에 실패했습니다: ${msg}`);
+ }finally{setBusy(false)}
+}
+function leaveRecovery(){
+ window.history.replaceState({},'', '/');
+ setRecoveryRoute(false);setRecoveryPass('');setRecoveryConfirm('');setRecoveryError('');
+ setAuthMode('login');
+}
+async function submitNewPassword(event){
+ event.preventDefault();
+ if(busy)return;
+ if(!session){setRecoveryError('재설정 링크가 만료되었거나 유효하지 않습니다. 로그인 화면에서 재설정 메일을 다시 요청해 주세요.');return}
+ if(recoveryPass.length<8){setRecoveryError('새 비밀번호는 8자 이상 입력해 주세요.');return}
+ if(recoveryPass!==recoveryConfirm){setRecoveryError('새 비밀번호와 비밀번호 확인이 일치하지 않습니다.');return}
+ setRecoveryError('');setBusy(true);
+ try{
+  const{error}=await db.auth.updateUser({password:recoveryPass});
+  if(error)throw error;
+  await db.auth.signOut();
+  leaveRecovery();setPass('');setConfirmPass('');
+  setNotice('비밀번호가 변경되었습니다. 새 비밀번호로 로그인해 주세요.');
+ }catch(error){setRecoveryError(`비밀번호 변경에 실패했습니다: ${error?.message||'다시 시도해 주세요.'}`)}
+ finally{setBusy(false)}
+}
 async function logout(){await db.auth.signOut();setTab('entry')}
 async function photo(file){
  if(!file)return;
@@ -337,7 +399,31 @@ const ownerEditPanel=owner&&ownerEditing&&<section className="panel owner-edit-p
 const billingPanel=<section className="panel billing-panel"><div className="billing-heading"><div><h2>선택 작업내역 정산</h2><p className="muted">아래 작업내역에서 체크한 항목만 합산합니다. 기간이나 검색 조건을 변경하면 선택이 초기화됩니다.</p></div><button type="button" onClick={()=>{setSelectedIds([]);setExistingBalanceInput('');setCopyNotice('')}} disabled={!selectedIds.length}>선택 해제</button></div><div className="billing-grid"><div><span>선택 작업</span><strong>{selectedRows.length}건</strong></div><div><span>이불커버</span><strong>{selectedTotal.duvet}개 · {selectedTotal.duvet/2}세트</strong><small>{won(selectedCoverPrice)}</small></div><div><span>수건 소</span><strong>{selectedTotal.small}개</strong><small>{won(selectedSmallPrice)}</small></div><div><span>수건 대</span><strong>{selectedTotal.large}개</strong><small>{won(selectedLargePrice)}</small></div></div><div className="billing-bottom"><div><span>총 청구금액</span><strong>{won(selectedAmount)}</strong></div></div><div className="billing-balance"><label htmlFor="existing-balance">기존 잔액 (원)<span className="balance-input-row"><input id="existing-balance" type="text" inputMode="decimal" autoComplete="off" value={formattedExistingBalance} onChange={e=>{const raw=e.target.value.trim().replace(/^[−–]/,'-');const negative=raw.startsWith('-');const digits=raw.replace(/[^0-9]/g,'').slice(0,12);setExistingBalanceInput(`${negative?'-':''}${digits}`);setCopyNotice('')}} placeholder="예: -100,000" aria-describedby="balance-help"/><button type="button" className="balance-sign-toggle" aria-label="기존 잔액 부호 변경" title="기존 잔액 부호 변경" onClick={()=>{setExistingBalanceInput(v=>v.startsWith('-')?v.slice(1):`-${v}`);setCopyNotice('')}}>+/−</button></span></label><p id="balance-help" className="muted">기존 잔액에서 선택한 작업의 총 청구금액을 차감합니다. 입력한 잔액은 저장되지 않습니다.</p><div className="billing-balance-calculation"><div><span>기존 잔액</span><b>{hasExistingBalance?won(existingBalance):'미입력'}</b></div><div><span>선택한 총 청구금액</span><b>− {won(selectedAmount)}</b></div><div className="billing-remaining"><span>잔액</span><strong className={hasExistingBalance&&remainingBalance<0?'negative-balance':''}>{hasExistingBalance?won(remainingBalance):'입력 대기'}</strong></div></div></div><div className="billing-actions"><button type="button" className="billing-copy" disabled={!selectedRows.length||!hasExistingBalance} onClick={()=>copySummary(selectedCopyText)}>수량·잔액 복사</button></div>{!hasExistingBalance&&<p className="muted">수량과 잔액을 복사하려면 기존 잔액을 입력해 주세요.</p>}{copyNotice&&<p role="status" className="muted">{copyNotice}</p>}<textarea className="billing-preview" readOnly value={selectedCopyText} placeholder="작업내역을 선택하고 기존 잔액을 입력하면 복사할 내용이 표시됩니다." aria-label="복사용 수량 및 잔액"/></section>;
 if(!db)return <div className="center"><div className="login"><h1>무무베딩 수량관리</h1><p>클라우드 연결 전입니다. 프로젝트의 README 안내에 따라 Supabase 환경변수를 설정해 주세요.</p></div></div>;
 if(!ready)return <div className="center">불러오는 중...</div>;
-if(!session)return <div className="center"><form className="login" onSubmit={login}><div className="brand">MUMU BEDDING</div><h1>{authMode==='login'?'수량관리 로그인':'직원 회원가입'}</h1><p>현장 수량 기록과 실시간 운영 현황</p>{authMode==='signup'&&<label>직원 이름<input required value={name} onChange={e=>setName(e.target.value)} placeholder="이름"/></label>}<label>이메일<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com"/></label><label>비밀번호<input type="password" minLength={authMode==='signup'?8:6} required value={pass} onChange={e=>setPass(e.target.value)} placeholder={authMode==='signup'?'8자 이상 입력':'비밀번호 입력'}/></label>{authMode==='signup'&&<><label>비밀번호 확인<input type="password" minLength="8" required value={confirmPass} onChange={e=>setConfirmPass(e.target.value)} placeholder="비밀번호 다시 입력"/></label>{confirmPass&&<p className={pass===confirmPass?'password-ok':'password-error'}>{pass===confirmPass?'✓ 비밀번호가 일치합니다.':'비밀번호가 일치하지 않습니다.'}</p>}</>}<button className="primary" disabled={busy||(authMode==='signup'&&(pass.length<8||pass!==confirmPass))}>{authMode==='login'?'로그인':'가입 신청'}</button><button type="button" className="plain" onClick={()=>{setAuthMode(authMode==='login'?'signup':'login');setPass('');setConfirmPass('');setNotice('')}}>{authMode==='login'?'신규 직원 회원가입':'로그인으로 돌아가기'}</button>{notice&&<div className="notice">{notice}</div>}</form></div>;
+if(recoveryRoute)return <div className="center"><form className="login password-reset-form" onSubmit={submitNewPassword}>
+ <div className="brand">MUMU BEDDING</div><h1>새 비밀번호 설정</h1>
+ {recoveryUrlError?<p className="password-error" role="alert">재설정 링크가 유효하지 않거나 만료되었습니다. 새 링크를 요청해 주세요.</p>:session?<>
+ <p>사용할 새 비밀번호를 입력해 주세요. 기존 작업내역과 계정은 유지됩니다.</p>
+ <label>새 비밀번호<input type="password" autoComplete="new-password" minLength={8} required value={recoveryPass} onChange={e=>setRecoveryPass(e.target.value)} placeholder="8자 이상 입력"/></label>
+ <label>새 비밀번호 확인<input type="password" autoComplete="new-password" minLength={8} required value={recoveryConfirm} onChange={e=>setRecoveryConfirm(e.target.value)} placeholder="새 비밀번호 다시 입력"/></label>
+ {recoveryConfirm&&<p className={recoveryPass===recoveryConfirm?'password-ok':'password-error'}>{recoveryPass===recoveryConfirm?'✓ 비밀번호가 일치합니다.':'비밀번호가 일치하지 않습니다.'}</p>}
+ <button className="primary" disabled={busy||recoveryPass.length<8||recoveryPass!==recoveryConfirm}>{busy?'변경 중...':'비밀번호 변경하기'}</button>
+ </>:<p className="password-error" role="alert">재설정 인증을 확인할 수 없습니다. 링크가 만료되었다면 새 링크를 요청해 주세요.</p>}
+ {recoveryError&&<div className="notice" role="alert">{recoveryError}</div>}
+ <button type="button" className="plain" disabled={busy} onClick={()=>{leaveRecovery();setAuthMode('forgot');setNotice('')}}>재설정 링크 다시 요청</button>
+ </form></div>;
+if(!session)return <div className="center"><form className="login" onSubmit={authMode==='forgot'?requestPasswordReset:login}>
+ <div className="brand">MUMU BEDDING</div>
+ <h1>{authMode==='login'?'수량관리 로그인':authMode==='signup'?'직원 회원가입':'비밀번호 찾기'}</h1>
+ <p>{authMode==='forgot'?'가입할 때 사용한 이메일을 입력하면 비밀번호 재설정 링크를 보내드립니다.':'현장 수량 기록과 실시간 운영 현황'}</p>
+ {authMode==='signup'&&<label>직원 이름<input required value={name} onChange={e=>setName(e.target.value)} placeholder="이름" autoComplete="name"/></label>}
+ <label>이메일<input type="email" required value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" autoComplete="email"/></label>
+ {authMode!=='forgot'&&<label>비밀번호<input type="password" autoComplete={authMode==='signup'?'new-password':'current-password'} minLength={authMode==='signup'?8:6} required value={pass} onChange={e=>setPass(e.target.value)} placeholder={authMode==='signup'?'8자 이상 입력':'비밀번호 입력'}/></label>}
+ {authMode==='signup'&&<><label>비밀번호 확인<input type="password" autoComplete="new-password" minLength={8} required value={confirmPass} onChange={e=>setConfirmPass(e.target.value)} placeholder="비밀번호 다시 입력"/></label>{confirmPass&&<p className={pass===confirmPass?'password-ok':'password-error'}>{pass===confirmPass?'✓ 비밀번호가 일치합니다.':'비밀번호가 일치하지 않습니다.'}</p>}</>}
+ <button className="primary" disabled={busy||(authMode==='signup'&&(pass.length<8||pass!==confirmPass))}>{busy?'처리 중...':authMode==='login'?'로그인':authMode==='signup'?'가입 신청':'재설정 이메일 보내기'}</button>
+ {authMode==='login'&&<><button type="button" className="plain" onClick={()=>{setAuthMode('forgot');setPass('');setConfirmPass('');setNotice('')}}>비밀번호를 잊으셨나요?</button><button type="button" className="plain" onClick={()=>{setAuthMode('signup');setPass('');setConfirmPass('');setNotice('')}}>신규 직원 회원가입</button></>}
+ {authMode!=='login'&&<button type="button" className="plain" onClick={()=>{setAuthMode('login');setPass('');setConfirmPass('');setNotice('')}}>로그인으로 돌아가기</button>}
+ {notice&&<div className="notice" role="status">{notice}</div>}
+ </form></div>;
 if(!profile)return <div className="center">계정 정보를 불러오는 중...</div>;
 if(!profile.approved)return <div className="center"><div className="login"><div className="brand">MUMU BEDDING</div><h2>사업주 승인 대기 중</h2><p>{profile.name}님의 계정이 생성되었습니다. 사업주 승인 후 수량을 등록할 수 있습니다.</p><button onClick={()=>location.reload()}>승인 상태 새로고침</button><button className="plain" onClick={logout}>로그아웃</button></div></div>;
 const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['mine','내 기록 수정',ClipboardList],['history','수정이력',History]];
@@ -371,6 +457,6 @@ return <div className="shell"><header><div><div className="brand">MUMU BEDDING</
 {tab==='mine'&&<section className="panel"><h2>내 기록 수정 <small>작업내역을 확인하고 수정할 수 있습니다.</small></h2>{entryTable(filtered,true)}</section>}
 
 {tab==='history'&&<section className="panel"><h2>수정 이력 <small>수정 전후 수량은 삭제되지 않습니다.</small></h2><div className="history">{shownChanges.map(c=><div className="change" key={c.id}><div className="changehead"><b>{c.reason}</b><span>{time(c)} · {names[c.changed_by]||'직원'}</span></div><div className="diff"><div><small>수정 전</small><p>{c.before_values.address}</p><p>이불 {c.before_values.duvet} · 소 {c.before_values.small} · 대 {c.before_values.large}</p></div><div><small>수정 후</small><p>{c.after_values.address}</p><p>이불 {c.after_values.duvet} · 소 {c.after_values.small} · 대 {c.after_values.large}</p></div></div>{c.note&&<p className="muted">사유: {c.note}</p>}</div>)}{!shownChanges.length&&<p className="muted">수정 이력이 없습니다.</p>}</div></section>}
-{tab==='staff'&&<section className="panel"><h2>직원 관리</h2><p className="muted">신규 직원은 회원가입 후 사업주 승인 시 작업을 시작할 수 있습니다.</p>{staff.map(p=><div className="staff" key={p.id}><div><b>{p.name}</b><small>{p.role==='owner'?'사업주':p.approved?'활동 가능':'승인 대기 / 정지'}</small></div>{p.role!=='owner'&&<button onClick={()=>approve(p)}>{p.approved?'계정 정지':'승인 / 활성화'}</button>}</div>)}</section>}
+{tab==='staff'&&<section className="panel"><h2>직원 관리</h2><p className="muted">직원 이름과 가입 이메일을 확인하고, 가입 승인 상태를 관리할 수 있습니다.</p>{staffEmailError&&<p className="staff-email-warning" role="alert">{staffEmailError}</p>}{staff.map(p=><div className="staff" key={p.id}><div className="staff-identity"><b>{p.name}</b><small className="staff-email">{staffEmails[p.id]|| (staffEmailError?'이메일 조회 설정 필요':'등록 이메일 없음')}</small><small>{p.role==='owner'?'사업주':p.approved?'활동 가능':'승인 대기 / 정지'}</small></div>{p.role!=='owner'&&<button onClick={()=>approve(p)}>{p.approved?'계정 정지':'승인 / 활성화'}</button>}</div>)}</section>}
 </main><footer>© 무무베딩 · 현장 수량관리</footer></div>}
 createRoot(document.getElementById('root')).render(<App/>);

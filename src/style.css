@@ -125,3 +125,15 @@
 .entry-confirm-actions button{flex:1;min-height:48px;padding:12px 9px;font-weight:700}
 .entry-confirm-actions .entry-confirm-submit{background:#174636;color:#fff}
 @media(max-width:420px){.entry-confirm-content{padding:19px}.entry-confirm-actions{flex-direction:column-reverse}.entry-confirm-content h2{font-size:20px}}
+
+/* 로그인 비밀번호 찾기 · 재설정 화면 */
+.password-reset-form {max-width:440px}
+.password-reset-form .password-ok,.password-reset-form .password-error {line-height:1.5;font-size:13px;margin:0 0 8px}
+.password-reset-form button.plain {min-height:42px}
+.password-reset-form .notice {overflow-wrap:anywhere}
+
+/* 직원관리: 가입 이메일을 이름 아래 표시하고 긴 주소는 줄바꿈 */
+.staff-identity{min-width:0;flex:1;padding-right:12px}
+.staff-email{color:#465a4e!important;overflow-wrap:anywhere;word-break:break-word}
+.staff-email-warning{padding:12px 14px;border-radius:10px;background:#fff4e5;color:#7d4b12;font-size:13px}
+.staff>button{flex-shrink:0}
