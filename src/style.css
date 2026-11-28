@@ -163,3 +163,6 @@
 .hr-radius-settings input{max-width:220px}
 .hr-radius-settings button{max-width:220px}
 @media(max-width:550px){.hr-leave-form{grid-template-columns:1fr}.hr-attendance-status,.hr-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.hr-actions button{flex:1}}
+
+/* 사업주 정산: 잔액이 20,000원 미만인 경우 안내 */
+.billing-low-notice{margin:10px 0 0;color:#a53229;font-size:14px;font-weight:700;}
