@@ -112,6 +112,8 @@ const[recoveryPass,setRecoveryPass]=useState(''),[recoveryConfirm,setRecoveryCon
 const recoveryUrlError=new URLSearchParams(window.location.hash.replace(/^#/, '')).get('error_description')||new URLSearchParams(window.location.search).get('error_description');
 // HR data stays separate from existing laundry quantity records.
 const[workplace,setWorkplace]=useState(INITIAL_WORKPLACE),[attendance,setAttendance]=useState([]),[leaves,setLeaves]=useState([]),[hrError,setHrError]=useState('');
+// 한국 날짜가 자정에 바뀌면 열린 전날 출근을 현재 출근 상태로 보지 않습니다.
+const[todayKst,setTodayKst]=useState(dateKST());
 const[hrBusy,setHrBusy]=useState(false),[geoStatus,setGeoStatus]=useState(''),[lastDistance,setLastDistance]=useState(null);
 const[leaveStart,setLeaveStart]=useState(dateKST()),[leaveEnd,setLeaveEnd]=useState(dateKST()),[leaveType,setLeaveType]=useState('연차'),[leaveNote,setLeaveNote]=useState('');
 const[radiusInput,setRadiusInput]=useState('250');
@@ -137,8 +139,19 @@ useEffect(()=>{
 useEffect(()=>{if(!session){setProfile(null);return}db.from('profiles').select('*').eq('id',session.user.id).single().then(({data,error})=>{setProfile(data);if(error)setNotice(error.message)})},[session]);
 const owner=profile?.role==='owner';
 useEffect(()=>{if(profile?.role==='owner'&&tab==='entry')setTab('dashboard')},[profile?.role]);
-const currentAttendance=attendance.find(a=>a.employee_id===session?.user?.id&&!a.check_out_at);
-const attendanceToday=attendance.filter(a=>workDateKST({created_at:a.check_in_at})===dateKST());
+const attendanceWorkDay=a=>a.work_date||workDateKST({created_at:a.check_in_at});
+const currentAttendance=attendance.find(a=>a.employee_id===session?.user?.id&&!a.check_out_at&&attendanceWorkDay(a)===todayKst);
+const attendanceToday=attendance.filter(a=>attendanceWorkDay(a)===todayKst);
+const missedAttendance=attendance.filter(a=>a.employee_id===session?.user?.id&&!a.check_out_at&&attendanceWorkDay(a)<todayKst);
+const attendanceStateLabel=a=>a.check_out_method==='geofence'?'지역 이탈 자동':a.check_out_method==='manual'?'수동':a.check_out_at?'기타':attendanceWorkDay(a)<todayKst?'미퇴근':'근무 중';
+// 모바일 브라우저가 백그라운드에서 멈췄다가 재개되어도 날짜를 재확인합니다.
+useEffect(()=>{
+ const updateDay=()=>setTodayKst(dateKST());
+ const timer=window.setInterval(updateDay,30000);
+ window.addEventListener('focus',updateDay);
+ document.addEventListener('visibilitychange',updateDay);
+ return()=>{window.clearInterval(timer);window.removeEventListener('focus',updateDay);document.removeEventListener('visibilitychange',updateDay)};
+},[]);
 const pendingLeaves=leaves.filter(l=>l.status==='pending');
 const ownerAttendByDate=attendance.filter(a=>workDateKST({created_at:a.check_in_at})>=startDate&&workDateKST({created_at:a.check_in_at})<=endDate);
 async function loadHr(){
@@ -157,7 +170,7 @@ async function loadHr(){
  }catch(e){setHrError(e.message||'근태 정보를 불러오지 못했습니다.');}
  finally{hrReadingRef.current=false}
 }
-useEffect(()=>{if(profile?.approved)loadHr()},[profile?.id,profile?.approved]);
+useEffect(()=>{if(profile?.approved)loadHr()},[profile?.id,profile?.approved,todayKst]);
 useEffect(()=>{if(profile?.approved&&tab==='dashboard')loadHr()},[tab,startDate,endDate]);
 function readLocation(){return new Promise((resolve,reject)=>{
  if(!navigator.geolocation){reject(new Error('이 기기에서는 위치 서비스를 지원하지 않습니다.'));return}
@@ -197,7 +210,7 @@ useEffect(()=>{
  if(!profile?.approved||owner||!currentAttendance||!navigator.geolocation)return;
  let disposed=false;
  const id=navigator.geolocation.watchPosition(async p=>{
-  if(disposed||autoOutRef.current)return;
+  if(disposed||autoOutRef.current||dateKST()!==todayKst)return;
   const coords=p.coords;
   if(coords.accuracy>120){setGeoStatus('GPS 오차가 커서 자동 퇴근을 보류하고 있습니다. 수동 퇴근도 가능합니다.');outsideRef.current={at:0,count:0};return}
   const dist=metersBetween(coords.latitude,coords.longitude,workplace.latitude,workplace.longitude);
@@ -213,7 +226,7 @@ useEffect(()=>{
  },e=>{if(!disposed)setGeoStatus(e.code===1?'위치 권한이 없어 자동 퇴근을 할 수 없습니다. 수동 퇴근을 사용하세요.':'위치 신호를 확인할 수 없습니다. 수동 퇴근이 가능합니다.')},{enableHighAccuracy:true,maximumAge:0,timeout:20000});
  geoWatchRef.current=id;
  return()=>{disposed=true;navigator.geolocation.clearWatch(id);if(geoWatchRef.current===id)geoWatchRef.current=null;outsideRef.current={at:0,count:0}};
-},[currentAttendance?.id,profile?.approved,owner,workplace.latitude,workplace.longitude,workplace.radius_m]);
+},[currentAttendance?.id,todayKst,profile?.approved,owner,workplace.latitude,workplace.longitude,workplace.radius_m]);
 async function submitLeave(event){
  event.preventDefault();if(hrBusy)return;setHrBusy(true);setHrError('');
  try{
@@ -533,7 +546,7 @@ if(!session)return <div className="center"><form className="login" onSubmit={aut
  </form></div>;
 if(!profile)return <div className="center">계정 정보를 불러오는 중...</div>;
 if(!profile.approved)return <div className="center"><div className="login"><div className="brand">MUMU BEDDING</div><h2>사업주 승인 대기 중</h2><p>{profile.name}님의 계정이 생성되었습니다. 사업주 승인 후 수량을 등록할 수 있습니다.</p><button onClick={()=>location.reload()}>승인 상태 새로고침</button><button className="plain" onClick={logout}>로그아웃</button></div></div>;
-const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['clock','출퇴근',Clock3],['leave','휴가 신청',CalendarDays],['mine','내 기록 수정',ClipboardList],['history','수정이력',History]];
+const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['clock',currentAttendance?'퇴근':'출근',Clock3],['leave','휴가 신청',CalendarDays],['mine','내 기록 수정',ClipboardList],['history','수정이력',History]];
 const shownChanges=changes.filter(x=>owner||x.changed_by===session.user.id);
 return <div className="shell"><header><div><div className="brand">MUMU BEDDING</div><h1>수량관리 시스템</h1></div><div className="user"><span>{profile.name} {owner?'· 사업주':''}</span><button title="로그아웃" onClick={logout}><LogOut size={17}/></button></div></header><nav>{tabs.map(([id,label,Icon])=><button key={id} className={tab===id?'selected':''} onClick={()=>setTab(id)}><Icon size={17}/>{label}</button>)}</nav><main>{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}>닫기</button></div>}
 {tab==='entry'&&<section className="panel editor"><h2>{editing?'작업내역 수정':'작업 수량 등록'}</h2><form onSubmit={save}><div className="address-entry-block">
@@ -564,18 +577,19 @@ return <div className="shell"><header><div><div className="brand">MUMU BEDDING</
 {tab==='clock'&&!owner&&<section className="panel hr-panel"><h2><Clock3 size={21}/> 출퇴근 기록</h2>
  <div className="hr-office"><MapPin size={18}/><div><strong>근무지 · 메트로폴리스</strong><p>{workplace.address||WORKPLACE_ADDRESS}</p><small>기준 반경 {workplace.radius_m}m · 위치 권한 필요</small></div></div>
  <div className="hr-attendance-status"><div><span>현재 상태</span><strong>{currentAttendance?'출근 중':'퇴근 상태'}</strong></div><div><span>출근 시각</span><strong>{currentAttendance?asKoreanDateTime(currentAttendance.check_in_at):'—'}</strong></div><div><span>현재 위치 거리</span><strong>{lastDistance===null?'위치 확인 전':lastDistance+'m'}</strong></div></div>
- <div className="hr-actions"><button className="primary" type="button" disabled={hrBusy||!!currentAttendance||!!hrError} onClick={clockIn}>출근하기</button><button type="button" disabled={hrBusy||!currentAttendance} onClick={()=>clockOut('manual')}>수동 퇴근</button></div>
+ <div className="hr-actions"><button className="primary" type="button" disabled={hrBusy||(!currentAttendance&&!!hrError)} onClick={()=>currentAttendance?clockOut('manual'):clockIn()}>{hrBusy?'처리 중…':currentAttendance?'퇴근하기':'출근하기'}</button></div>
+ {missedAttendance.length>0&&<p className="hr-caution">퇴근 기록이 없는 지난 출근 {missedAttendance.length}건이 있습니다. 전날 기록은 ‘미퇴근’으로 남으며 새 날짜의 출근은 가능합니다. 필요하면 사업주에게 기록 확인을 요청하세요.</p>}
  {geoStatus&&<p role="status" className="muted">{geoStatus}</p>}
- <p className="hr-caution">자동 퇴근은 웹앱이 열려 있고 위치 권한을 유지할 때만 작동합니다. 화면을 닫거나 위치 추적이 중단되면 수동 퇴근을 사용하세요. 배달 등 업무 중 근무지를 벗어나는 경우에도 자동 퇴근될 수 있습니다.</p>
- <h3>내 최근 출퇴근</h3><div className="scroll"><table><thead><tr><th>출근</th><th>퇴근</th><th>퇴근 방식</th></tr></thead><tbody>{attendance.filter(a=>a.employee_id===session.user.id).slice(0,30).map(a=><tr key={a.id}><td>{asKoreanDateTime(a.check_in_at)}</td><td>{asKoreanDateTime(a.check_out_at)}</td><td>{a.check_out_method==='geofence'?'지역 이탈 자동':a.check_out_method==='manual'?'수동':a.check_out_at?'기타':'근무 중'}</td></tr>)}{!attendance.some(a=>a.employee_id===session.user.id)&&<tr><td colSpan={3}>출퇴근 기록이 없습니다.</td></tr>}</tbody></table></div>
+ <p className="hr-caution">근무지를 벗어나면 웹앱이 실행 중일 때 자동 퇴근할 수 있습니다. 직접 퇴근하려면 ‘퇴근하기’를 누르세요. 자정이 지나면 다시 ‘출근하기’로 바뀌며, 퇴근하지 않은 전날 기록은 ‘미퇴근’으로 남습니다. 앱을 닫거나 휴대전화가 절전 상태이면 자동 퇴근이 보장되지 않습니다. 업무상 배송을 위해 지역을 벗어나도 자동 퇴근될 수 있습니다.</p>
+ <h3>내 최근 출퇴근</h3><div className="scroll"><table><thead><tr><th>출근</th><th>퇴근</th><th>퇴근 방식</th></tr></thead><tbody>{attendance.filter(a=>a.employee_id===session.user.id).slice(0,30).map(a=><tr key={a.id}><td>{asKoreanDateTime(a.check_in_at)}</td><td>{asKoreanDateTime(a.check_out_at)}</td><td>{attendanceStateLabel(a)}</td></tr>)}{!attendance.some(a=>a.employee_id===session.user.id)&&<tr><td colSpan={3}>출퇴근 기록이 없습니다.</td></tr>}</tbody></table></div>
  </section>}
 {tab==='leave'&&!owner&&<section className="panel hr-panel"><h2><CalendarDays size={21}/> 휴가 신청</h2>
  <form className="hr-leave-form" onSubmit={submitLeave}><label>휴가 유형<select value={leaveType} onChange={e=>setLeaveType(e.target.value)}><option>연차</option><option>오전 반차</option><option>오후 반차</option><option>기타</option></select></label><label>시작일<input type="date" required value={leaveStart} onChange={e=>{setLeaveStart(e.target.value);if(e.target.value>leaveEnd)setLeaveEnd(e.target.value)}}/></label><label>종료일<input type="date" required min={leaveStart} value={leaveEnd} onChange={e=>setLeaveEnd(e.target.value)}/></label><label className="hr-note">사유 (선택)<textarea rows={2} maxLength={1000} placeholder="전달할 내용이 있으면 입력하세요" value={leaveNote} onChange={e=>setLeaveNote(e.target.value)}/></label><button className="primary" disabled={hrBusy||!!hrError}>휴가 신청하기</button></form>
  <h3>내 휴가 신청 내역</h3><div className="scroll"><table><thead><tr><th>기간</th><th>유형</th><th>상태</th><th>신청 취소</th></tr></thead><tbody>{leaves.filter(l=>l.employee_id===session.user.id).map(l=><tr key={l.id}><td>{l.start_date}{l.end_date!==l.start_date?' ~ '+l.end_date:''}</td><td>{l.leave_type}</td><td>{({pending:'승인 대기',approved:'승인',rejected:'반려',cancelled:'취소'})[l.status]||l.status}</td><td>{l.status==='pending'?<button disabled={hrBusy} onClick={()=>cancelLeave(l.id)}>취소</button>:'—'}</td></tr>)}{!leaves.some(l=>l.employee_id===session.user.id)&&<tr><td colSpan={4}>휴가 신청 내역이 없습니다.</td></tr>}</tbody></table></div>
  </section>}
 {tab==='dashboard'&&<section className="panel hr-panel"><div className="hr-dashboard-title"><h2>출퇴근 · 휴가 현황</h2><button onClick={loadHr} disabled={hrBusy}><RefreshCw size={15}/> 새로고침</button></div>
- <div className="hr-stats"><div><span>오늘 출근한 인원</span><strong>{new Set(attendanceToday.map(a=>a.employee_id)).size}명</strong></div><div><span>현재 출근 중</span><strong>{attendance.filter(a=>!a.check_out_at).length}명</strong></div><div><span>휴가 승인 대기</span><strong>{pendingLeaves.length}건</strong></div><div><span>오늘 승인 휴가</span><strong>{leaves.filter(l=>l.status==='approved'&&l.start_date<=dateKST()&&l.end_date>=dateKST()).length}건</strong></div></div>
- <h3>출퇴근 내역 · 선택 기간</h3><div className="scroll"><table><thead><tr><th>직원</th><th>출근 시간</th><th>퇴근 시간</th><th>퇴근 방식</th></tr></thead><tbody>{ownerAttendByDate.map(a=><tr key={a.id}><td>{names[a.employee_id]||'직원'}</td><td>{asKoreanDateTime(a.check_in_at)}</td><td>{asKoreanDateTime(a.check_out_at)}</td><td>{a.check_out_method==='geofence'?'지역 이탈 자동':a.check_out_method==='manual'?'수동':'근무 중'}</td></tr>)}{!ownerAttendByDate.length&&<tr><td colSpan={4}>선택 기간의 출퇴근 기록이 없습니다.</td></tr>}</tbody></table></div>
+ <div className="hr-stats"><div><span>오늘 출근한 인원</span><strong>{new Set(attendanceToday.map(a=>a.employee_id)).size}명</strong></div><div><span>현재 출근 중</span><strong>{attendance.filter(a=>!a.check_out_at&&attendanceWorkDay(a)===todayKst).length}명</strong></div><div><span>휴가 승인 대기</span><strong>{pendingLeaves.length}건</strong></div><div><span>오늘 승인 휴가</span><strong>{leaves.filter(l=>l.status==='approved'&&l.start_date<=dateKST()&&l.end_date>=dateKST()).length}건</strong></div></div>
+ <h3>출퇴근 내역 · 선택 기간</h3><div className="scroll"><table><thead><tr><th>직원</th><th>출근 시간</th><th>퇴근 시간</th><th>퇴근 방식</th></tr></thead><tbody>{ownerAttendByDate.map(a=><tr key={a.id}><td>{names[a.employee_id]||'직원'}</td><td>{asKoreanDateTime(a.check_in_at)}</td><td>{asKoreanDateTime(a.check_out_at)}</td><td>{attendanceStateLabel(a)}</td></tr>)}{!ownerAttendByDate.length&&<tr><td colSpan={4}>선택 기간의 출퇴근 기록이 없습니다.</td></tr>}</tbody></table></div>
  <h3>휴가 신청 · 승인/반려</h3><div className="scroll"><table><thead><tr><th>직원</th><th>휴가 기간</th><th>유형</th><th>상태</th><th>처리</th></tr></thead><tbody>{leaves.map(l=><tr key={l.id}><td>{names[l.employee_id]||'직원'}</td><td>{l.start_date}{l.start_date!==l.end_date?' ~ '+l.end_date:''}</td><td>{l.leave_type}</td><td>{({pending:'승인 대기',approved:'승인',rejected:'반려',cancelled:'취소'})[l.status]||l.status}</td><td>{l.status==='pending'?<span className="hr-actions-inline"><button disabled={hrBusy} onClick={()=>reviewLeave(l.id,'approved')}>승인</button><button disabled={hrBusy} onClick={()=>reviewLeave(l.id,'rejected')}>반려</button></span>:'—'}</td></tr>)}{!leaves.length&&<tr><td colSpan={5}>휴가 신청 내역이 없습니다.</td></tr>}</tbody></table></div>
  <form className="hr-radius-settings" onSubmit={updateRadius}><strong><MapPin size={16}/> 출퇴근 기준 근무지</strong><p>{workplace.address||WORKPLACE_ADDRESS}</p><label>근무지 반경 (100~2,000m)<input inputMode="numeric" type="number" min="100" max="2000" step="10" value={radiusInput} onChange={e=>setRadiusInput(e.target.value)}/></label><button disabled={hrBusy||!!hrError} type="submit">반경 저장</button><p className="muted">위치는 중앙로1261번길 77 기준입니다. 반경 안에서 출근할 수 있고, 밖으로 나가면 위치가 안정적으로 확인되는 경우 자동 퇴근합니다.</p></form>
  </section>}
