@@ -2,7 +2,7 @@
 import React,{useEffect,useMemo,useState,useRef} from 'react';
 import{createRoot}from'react-dom/client';
 import{createClient}from'@supabase/supabase-js';
-import{Camera,LayoutDashboard,ClipboardList,History,Users,LogOut,Plus,Minus,Download,RefreshCw,Search}from'lucide-react';
+import{Camera,LayoutDashboard,ClipboardList,History,Users,LogOut,Plus,Minus,Download,RefreshCw,Search,MapPin,Clock3,CalendarDays}from'lucide-react';
 import*as XLSX from'xlsx';
 import './style.css';
 const url=import.meta.env.VITE_SUPABASE_URL,key=import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -91,6 +91,18 @@ const coverPrice=n=>n<=0?0:n===1?12000:15000+Math.floor((n-2)/2)*7000+((n-2)%2)*
 const won=n=>n.toLocaleString('ko-KR')+'원';
 const people=rows=>new Set(rows.map(x=>x.employee_id)).size;
 const workDateKST=r=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(r.created_at));
+const dateTimeKST=v=>v?new Date(v).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+const distanceInMeters=(a,b,c,d)=>{const rad=x=>x*Math.PI/180,R=6371000;const dl=rad(c-a),dn=rad(d-b);const u=Math.sin(dl/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.min(1,Math.sqrt(u)))};
+const positionOnce=()=>new Promise((resolve,reject)=>{if(!navigator.geolocation)return reject(new Error('이 브라우저는 위치 확인을 지원하지 않습니다.'));navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,maximumAge:0,timeout:20000})});
+// 직원 휴가 신청 마감: 휴가 시작 18시간 전 (대한민국 표준시).
+// 날짜만 입력하는 화면이므로 연차/오전 반차/기타는 09:00, 오후 반차는 13:00부터 시작한다고 간주합니다.
+const leaveStartHour=type=>type==='오후 반차'?13:9;
+const leaveCutoffTime=(startDate,type)=>{
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(startDate||''))return NaN;
+ return new Date(`${startDate}T${String(leaveStartHour(type)).padStart(2,'0')}:00:00+09:00`).getTime()-18*60*60*1000;
+};
+const leaveStatus={pending:'승인 대기',approved:'승인',rejected:'반려',cancelled:'신청 취소'};
+
 function App(){
 const[session,setSession]=useState(null),[ready,setReady]=useState(false),[profile,setProfile]=useState(null),[tab,setTab]=useState('entry');
 const[rows,setRows]=useState([]),[changes,setChanges]=useState([]),[staff,setStaff]=useState([]),[staffEmails,setStaffEmails]=useState({}),[staffEmailError,setStaffEmailError]=useState('');
@@ -124,6 +136,132 @@ useEffect(()=>{
 },[]);
 useEffect(()=>{if(!session){setProfile(null);return}db.from('profiles').select('*').eq('id',session.user.id).single().then(({data,error})=>{setProfile(data);if(error)setNotice(error.message)})},[session]);
 const owner=profile?.role==='owner';
+useEffect(()=>{if(!profile?.id)return;if(owner&&['entry','mine','attendance','leave'].includes(tab))setTab('dashboard');if(!owner&&['dashboard','entries','staff'].includes(tab))setTab('entry')},[profile?.id,owner]);
+const[workplace,setWorkplace]=useState(null),[siteDraft,setSiteDraft]=useState({site_name:'무무베딩 근무지',latitude:'',longitude:'',radius_m:100});
+const[attendance,setAttendance]=useState([]),[activeShift,setActiveShift]=useState(null),[leaveItems,setLeaveItems]=useState([]);
+const[workBusy,setWorkBusy]=useState(false),[workNotice,setWorkNotice]=useState(''),[locationNotice,setLocationNotice]=useState('');
+const[leaveForm,setLeaveForm]=useState({leave_type:'연차',start_date:dateKST(),end_date:dateKST(),reason:''});
+const[leaveClock,setLeaveClock]=useState(()=>Date.now());
+useEffect(()=>{
+ if(tab!=='leave')return;
+ setLeaveClock(Date.now());
+ const timer=window.setInterval(()=>setLeaveClock(Date.now()),15000);
+ return()=>window.clearInterval(timer);
+},[tab]);
+const leaveDeadline=leaveCutoffTime(leaveForm.start_date,leaveForm.leave_type);
+const leaveDeadlinePassed=!Number.isFinite(leaveDeadline)||leaveClock>leaveDeadline;
+const leaveDeadlineText=Number.isFinite(leaveDeadline)
+ ?new Date(leaveDeadline).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',year:'numeric',month:'long',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false})
+ :'시작일을 선택해 주세요';
+const outsideCheckRef=useRef(null),autoClosingRef=useRef(false);
+
+async function loadWork(){
+ if(!db||!profile?.approved||!session?.user?.id)return;
+ const begin=owner?startDate:shiftKST(dateKST(),-30),end=owner?endDate:dateKST();
+ const from=begin+'T00:00:00+09:00',until=new Date(new Date(end+'T00:00:00+09:00').getTime()+86400000).toISOString();
+ const [site,records,openRecords,leaves,pending]=await Promise.all([
+  db.from('workplace_settings').select('*').eq('id',1).maybeSingle(),
+  owner?db.from('attendance_records').select('*').gte('clock_in_at',from).lt('clock_in_at',until).order('clock_in_at',{ascending:false}).limit(1000):Promise.resolve({data:[],error:null}),
+  db.from('attendance_records').select('*').is('clock_out_at',null).order('clock_in_at',{ascending:false}).limit(100),
+  db.from('leave_requests').select('*').order('created_at',{ascending:false}).limit(500),
+  owner?db.from('leave_requests').select('*').eq('status','pending').order('created_at',{ascending:false}).limit(500):Promise.resolve({data:[],error:null})
+ ]);
+ const error=[site,records,openRecords,leaves,pending].find(x=>x.error)?.error;
+ if(error){setWorkNotice('근태 데이터를 불러오지 못했습니다. ATTENDANCE_LEAVE_SETUP.sql 실행 여부를 확인해 주세요. ('+error.message+')');return}
+ setWorkplace(site.data||null);
+ if(site.data)setSiteDraft({site_name:site.data.site_name,latitude:String(site.data.latitude),longitude:String(site.data.longitude),radius_m:site.data.radius_m});
+ const mapped=new Map([...(records.data||[]),...(openRecords.data||[])].map(r=>[r.id,r]));
+ setAttendance(owner?[...mapped.values()].sort((a,b)=>new Date(b.clock_in_at)-new Date(a.clock_in_at)):[]);
+ setActiveShift((openRecords.data||[]).find(x=>x.employee_id===session.user.id)||null);
+ const leaveMap=new Map([...(leaves.data||[]),...(pending.data||[])].map(r=>[r.id,r]));
+ setLeaveItems([...leaveMap.values()].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)));
+}
+useEffect(()=>{if(profile?.approved)loadWork();else{setActiveShift(null);setAttendance([]);setLeaveItems([]);setWorkplace(null)}},[profile?.id,profile?.approved,startDate,endDate]);
+
+useEffect(()=>{
+ if(!owner||tab!=='dashboard'||!profile?.approved)return;
+ const timer=window.setInterval(()=>{if(document.visibilityState==='visible')loadWork()},60000);
+ return()=>window.clearInterval(timer);
+},[owner,tab,profile?.id,startDate,endDate]);
+
+async function saveWorkplace(event){
+ event.preventDefault();if(!owner||workBusy)return;
+ const lat=Number(siteDraft.latitude),lng=Number(siteDraft.longitude),radius=Number(siteDraft.radius_m);
+ if(siteDraft.latitude===''||siteDraft.longitude===''||!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180||!Number.isInteger(radius)||radius<100||radius>3000){setWorkNotice('위도·경도와 반경(100~3,000m)을 확인해 주세요.');return}
+ setWorkBusy(true);setWorkNotice('');
+ try{
+  const{error}=await db.from('workplace_settings').upsert({id:1,site_name:siteDraft.site_name.trim()||'무무베딩 근무지',latitude:lat,longitude:lng,radius_m:radius,updated_by:session.user.id,updated_at:new Date().toISOString()},{onConflict:'id'});
+  if(error)throw error;
+  setWorkNotice('근무지 위치와 반경을 저장했습니다.');await loadWork();
+ }catch(err){setWorkNotice('근무지 저장 오류: '+err.message)}finally{setWorkBusy(false)}
+}
+async function useMyLocationAsSite(){
+ setWorkBusy(true);setWorkNotice('현재 위치를 확인 중입니다. 실제 근무지 안에서 실행해 주세요.');
+ try{const pos=await positionOnce();if(pos.coords.accuracy>100)throw new Error('현재 위치 정확도가 100m보다 낮습니다. 실외에서 다시 시도하세요.');
+ setSiteDraft(v=>({...v,latitude:String(pos.coords.latitude),longitude:String(pos.coords.longitude)}));setWorkNotice('현재 위치를 입력했습니다. 근무지 반경을 확인하고 저장하세요.');
+ }catch(err){setWorkNotice('위치 확인 오류: '+(err.message||'권한을 확인해 주세요.'))}finally{setWorkBusy(false)}
+}
+async function clockIn(){
+ if(workBusy||activeShift)return;
+ if(!workplace){setWorkNotice('근무지가 아직 설정되지 않았습니다. 사업주에게 문의해 주세요.');return}
+ setWorkBusy(true);setWorkNotice('위치 확인 후 출근 처리 중입니다...');
+ try{const pos=await positionOnce();const{error}=await db.rpc('clock_in',{p_lat:pos.coords.latitude,p_lng:pos.coords.longitude,p_accuracy_m:Math.max(1,pos.coords.accuracy)});if(error)throw error;
+ setWorkNotice('출근이 정상 기록되었습니다. 웹앱이 열려 있는 동안 근무지를 벗어나면 자동 퇴근을 시도합니다.');setLocationNotice('근무지 이탈을 확인 중입니다.');await loadWork();
+ }catch(err){setWorkNotice('출근 처리 실패: '+(err.message||'위치 권한을 확인해 주세요.'))}finally{setWorkBusy(false)}
+}
+async function clockOut(automatic=false,position=null){
+ if(!activeShift||autoClosingRef.current||(!automatic&&workBusy))return;
+ autoClosingRef.current=true;if(!automatic)setWorkBusy(true);
+ try{const{error}=await db.rpc('clock_out',{p_auto:automatic,p_lat:automatic?position.coords.latitude:null,p_lng:automatic?position.coords.longitude:null,p_accuracy_m:automatic?Math.max(1,position.coords.accuracy):null});if(error)throw error;
+ outsideCheckRef.current=null;setWorkNotice(automatic?'근무지 이탈이 확인되어 자동 퇴근 처리되었습니다.':'퇴근이 기록되었습니다.');setLocationNotice('퇴근 완료');await loadWork();
+ }catch(err){setWorkNotice('퇴근 처리 실패: '+err.message);outsideCheckRef.current=null}finally{autoClosingRef.current=false;setWorkBusy(false)}
+}
+useEffect(()=>{
+ if(!profile?.approved||owner||!activeShift||!workplace||!navigator.geolocation)return;
+ let stopped=false;
+ const onPosition=pos=>{
+  if(stopped||autoClosingRef.current||!pos?.coords)return;
+  const accuracy=pos.coords.accuracy;
+  if(!Number.isFinite(accuracy)||accuracy>100||Date.now()-pos.timestamp>90000){setLocationNotice('GPS 신호가 불안정합니다. 자동 퇴근이 지연될 수 있습니다.');return}
+  const distance=distanceInMeters(pos.coords.latitude,pos.coords.longitude,workplace.latitude,workplace.longitude);
+  const outside=distance>Number(workplace.radius_m)+Math.max(30,accuracy);
+  if(!outside){outsideCheckRef.current=null;setLocationNotice('근무지 내 위치 확인됨 · 약 '+Math.round(distance)+'m');return}
+  const first=outsideCheckRef.current;
+  if(!first){outsideCheckRef.current=Date.now();setLocationNotice('근무지 밖으로 이동한 것으로 감지했습니다. 재확인 중입니다.');return}
+  if(Date.now()-first>=15000){setLocationNotice('근무지 밖 위치가 재확인되어 자동 퇴근을 요청합니다.');clockOut(true,pos)}
+ };
+ const onError=err=>{if(!stopped)setLocationNotice('위치 추적이 중단되었거나 허용되지 않았습니다. 필요하면 수동 퇴근하세요. ('+err.message+')')};
+ const requestLocation=()=>{if(!stopped&&document.visibilityState==='visible')navigator.geolocation.getCurrentPosition(onPosition,onError,{enableHighAccuracy:true,maximumAge:0,timeout:18000})};
+ const id=navigator.geolocation.watchPosition(onPosition,onError,{enableHighAccuracy:true,maximumAge:20000,timeout:30000});
+ const timer=window.setInterval(requestLocation,45000);
+ const onVisible=()=>{if(document.visibilityState==='visible')requestLocation()};
+ document.addEventListener('visibilitychange',onVisible);
+ return()=>{stopped=true;outsideCheckRef.current=null;navigator.geolocation.clearWatch(id);window.clearInterval(timer);document.removeEventListener('visibilitychange',onVisible)};
+},[profile?.id,profile?.approved,owner,activeShift?.id,workplace?.latitude,workplace?.longitude,workplace?.radius_m]);
+
+async function submitLeave(event){
+ event.preventDefault();if(workBusy)return;
+ if(!Number.isFinite(leaveCutoffTime(leaveForm.start_date,leaveForm.leave_type))||Date.now()>leaveCutoffTime(leaveForm.start_date,leaveForm.leave_type)){setWorkNotice('휴가 신청은 휴가 시작 18시간 전까지만 가능합니다. 신청 가능한 날짜를 선택해 주세요.');setLeaveClock(Date.now());return}
+ if(leaveForm.start_date>leaveForm.end_date){setWorkNotice('휴가 종료일은 시작일보다 빠를 수 없습니다.');return}
+ if(['오전 반차','오후 반차'].includes(leaveForm.leave_type)&&leaveForm.start_date!==leaveForm.end_date){setWorkNotice('반차는 하루만 신청할 수 있습니다.');return}
+ setWorkBusy(true);setWorkNotice('');
+ try{const{error}=await db.from('leave_requests').insert({...leaveForm,reason:leaveForm.reason.trim(),employee_id:session.user.id});if(error)throw error;
+ setWorkNotice('휴가 신청이 접수되었습니다. 사업주 승인을 기다려 주세요.');setLeaveForm({leave_type:'연차',start_date:dateKST(),end_date:dateKST(),reason:''});await loadWork();
+ }catch(err){setWorkNotice('휴가 신청 오류: '+err.message)}finally{setWorkBusy(false)}
+}
+async function decideLeave(id,decision){
+ if(!owner||workBusy)return;setWorkBusy(true);setWorkNotice('');
+ try{const{error}=await db.rpc('review_leave_request',{p_request_id:id,p_decision:decision});if(error)throw error;
+ setWorkNotice(decision==='approved'?'휴가 신청을 승인했습니다.':'휴가 신청을 반려했습니다.');await loadWork();
+ }catch(err){setWorkNotice('처리 오류: '+err.message)}finally{setWorkBusy(false)}
+}
+async function cancelLeave(id){
+ if(workBusy)return;setWorkBusy(true);setWorkNotice('');
+ try{const{error}=await db.rpc('cancel_leave_request',{p_request_id:id});if(error)throw error;
+ setWorkNotice('휴가 신청을 취소했습니다.');await loadWork();
+ }catch(err){setWorkNotice('취소 오류: '+err.message)}finally{setWorkBusy(false)}
+}
+
 // Only show the review dialog after the form has passed validation. Nothing is saved until confirmation.
 useEffect(()=>{
  const dialog=confirmDialogRef.current;
@@ -397,6 +535,12 @@ function exportXlsx(){const records=filtered.map(r=>({등록시간:time(r),시�
 const entryTable=(list,allowEdit=false,selectable=false)=><div className="scroll"><table><thead><tr>{allowEdit&&!selectable&&<th>수정</th>}{selectable&&<th><input type="checkbox" aria-label="현재 검색 결과 전체 선택" checked={list.length>0&&list.every(r=>selectedIds.includes(String(r.id)))} onChange={()=>toggleAll(list)}/></th>}<th>등록시간</th><th>주소지</th><th>이불커버</th><th>수건 소</th><th>수건 대</th>{allowEdit&&selectable&&<th>수정</th>}<th>직원</th></tr></thead><tbody>{list.map(r=><tr key={r.id} className={selectable&&selectedIds.includes(String(r.id))?'selected-entry':''}>{allowEdit&&!selectable&&<td><button type="button" onClick={()=>startEdit(r)}>수정</button></td>}{selectable&&<td><input type="checkbox" aria-label={`${r.address} 작업 선택`} checked={selectedIds.includes(String(r.id))} onChange={()=>toggleSelected(r.id)}/></td>}<td>{time(r)}</td><td>{r.address}</td><td>{r.duvet}</td><td>{r.small}</td><td>{r.large}</td>{allowEdit&&selectable&&<td><button type="button" disabled={ownerEditSaving} onClick={()=>openOwnerEdit(r)}>수정</button></td>}<td>{names[r.employee_id]||'직원'}</td></tr>)}</tbody></table>{!list.length&&<p className="muted">등록된 내역이 없습니다.</p>}</div>;
 const ownerEditPanel=owner&&ownerEditing&&<section className="panel owner-edit-panel" id="owner-entry-editor"><div className="owner-edit-heading"><div><h2>선택한 작업내역 수정</h2><p className="muted">한 건씩 주소지와 이불커버·수건 수량을 수정할 수 있습니다. 등록 직원과 시간은 유지됩니다.</p></div><button type="button" onClick={()=>{setOwnerEditing(null);setOwnerEditError('')}} disabled={ownerEditSaving}>닫기</button></div><div className="owner-edit-context"><div><span>등록시간</span><strong>{time(ownerEditing)}</strong></div><div><span>주소</span><strong>{ownerEditing.address}</strong></div><div><span>직원</span><strong>{names[ownerEditing.employee_id]||'직원'}</strong></div></div><form onSubmit={submitOwnerEdit}><label className="owner-edit-address">주소지 변경 (2글자 이상)<input type="text" autoComplete="off" required minLength={2} disabled={ownerEditSaving} value={ownerEditForm.address} onChange={e=>{setOwnerEditForm(v=>({...v,address:e.target.value}));if(ownerEditError)setOwnerEditError('')}} placeholder="변경할 주소를 입력해 주세요"/><small>변경 전: {ownerEditing.address}</small></label><div className="owner-edit-quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([key,label])=><label key={key}>{label}<div className="owner-edit-counter"><button type="button" aria-label={`${label} 1개 감소`} disabled={ownerEditSaving} onClick={()=>setOwnerEditForm(v=>({...v,[key]:Math.max(0,(Number(v[key])||0)-1)}))}><Minus size={17}/></button><input aria-label={`${label} 수량 수정`} type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="off" required disabled={ownerEditSaving} onFocus={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} onClick={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} value={ownerEditForm[key]} onChange={e=>setOwnerEditForm(v=>({...v,[key]:e.target.value.replace(/\D/g,'')}))} onBlur={()=>setOwnerEditForm(v=>({...v,[key]:v[key]===''?0:v[key]}))}/><button type="button" aria-label={`${label} 1개 증가`} disabled={ownerEditSaving} onClick={()=>setOwnerEditForm(v=>({...v,[key]:(Number(v[key])||0)+1}))}><Plus size={17}/></button></div><small>변경 전 {ownerEditing[key]}개</small></label>)}</div><label className="owner-edit-note">수정 메모 (선택)<textarea disabled={ownerEditSaving} value={ownerEditNote} onChange={e=>setOwnerEditNote(e.target.value)} placeholder="예: 현장 수량 재확인 후 변경" rows={2}/></label>{ownerEditError&&<p role="alert" className="owner-edit-error">{ownerEditError}</p>}<div className="owner-edit-actions"><button type="submit" className="owner-edit-save" disabled={ownerEditSaving}>{ownerEditSaving?'수정 저장 중...':'주소·수량 수정 저장'}</button><button type="button" disabled={ownerEditSaving} onClick={()=>setOwnerEditing(null)}>취소</button></div><p className="muted">저장하면 작업내역이 갱신되고, 주소 및 수량의 수정 전후 내용이 수정이력에 기록됩니다. 금액은 수량이 바뀐 경우에만 달라집니다.</p></form></section>;
 const billingPanel=<section className="panel billing-panel"><div className="billing-heading"><div><h2>선택 작업내역 정산</h2><p className="muted">아래 작업내역에서 체크한 항목만 합산합니다. 기간이나 검색 조건을 변경하면 선택이 초기화됩니다.</p></div><button type="button" onClick={()=>{setSelectedIds([]);setExistingBalanceInput('');setCopyNotice('')}} disabled={!selectedIds.length}>선택 해제</button></div><div className="billing-grid"><div><span>선택 작업</span><strong>{selectedRows.length}건</strong></div><div><span>이불커버</span><strong>{selectedTotal.duvet}개 · {selectedTotal.duvet/2}세트</strong><small>{won(selectedCoverPrice)}</small></div><div><span>수건 소</span><strong>{selectedTotal.small}개</strong><small>{won(selectedSmallPrice)}</small></div><div><span>수건 대</span><strong>{selectedTotal.large}개</strong><small>{won(selectedLargePrice)}</small></div></div><div className="billing-bottom"><div><span>총 청구금액</span><strong>{won(selectedAmount)}</strong></div></div><div className="billing-balance"><label htmlFor="existing-balance">기존 잔액 (원)<span className="balance-input-row"><input id="existing-balance" type="text" inputMode="decimal" autoComplete="off" value={formattedExistingBalance} onChange={e=>{const raw=e.target.value.trim().replace(/^[−–]/,'-');const negative=raw.startsWith('-');const digits=raw.replace(/[^0-9]/g,'').slice(0,12);setExistingBalanceInput(`${negative?'-':''}${digits}`);setCopyNotice('')}} placeholder="예: -100,000" aria-describedby="balance-help"/><button type="button" className="balance-sign-toggle" aria-label="기존 잔액 부호 변경" title="기존 잔액 부호 변경" onClick={()=>{setExistingBalanceInput(v=>v.startsWith('-')?v.slice(1):`-${v}`);setCopyNotice('')}}>+/−</button></span></label><p id="balance-help" className="muted">기존 잔액에서 선택한 작업의 총 청구금액을 차감합니다. 입력한 잔액은 저장되지 않습니다.</p><div className="billing-balance-calculation"><div><span>기존 잔액</span><b>{hasExistingBalance?won(existingBalance):'미입력'}</b></div><div><span>선택한 총 청구금액</span><b>− {won(selectedAmount)}</b></div><div className="billing-remaining"><span>잔액</span><strong className={hasExistingBalance&&remainingBalance<0?'negative-balance':''}>{hasExistingBalance?won(remainingBalance):'입력 대기'}</strong></div></div></div><div className="billing-actions"><button type="button" className="billing-copy" disabled={!selectedRows.length||!hasExistingBalance} onClick={()=>copySummary(selectedCopyText)}>수량·잔액 복사</button></div>{!hasExistingBalance&&<p className="muted">수량과 잔액을 복사하려면 기존 잔액을 입력해 주세요.</p>}{copyNotice&&<p role="status" className="muted">{copyNotice}</p>}<textarea className="billing-preview" readOnly value={selectedCopyText} placeholder="작업내역을 선택하고 기존 잔액을 입력하면 복사할 내용이 표시됩니다." aria-label="복사용 수량 및 잔액"/></section>;
+const periodAttend=attendance.filter(r=>r.work_date>=startDate&&r.work_date<=endDate||!r.clock_out_at);
+const pendingLeaves=leaveItems.filter(r=>r.status==='pending');
+const visibleLeaveItems=leaveItems.filter(r=>r.status==='pending'||r.start_date<=endDate&&r.end_date>=startDate);
+const workplacePanel=owner&&<section className="panel work-panel"><h2><MapPin size={19}/> 근무지 자동 퇴근 설정</h2><p className="muted">직원의 출근 위치와 자동 퇴근 판정에 사용할 기준점입니다. 실제 근무지에 있을 때 ‘현재 위치로 지정’을 누르거나 위도·경도를 직접 입력하세요.</p><form onSubmit={saveWorkplace} className="work-site-form"><label>근무지 이름<input required maxLength={100} value={siteDraft.site_name} onChange={e=>setSiteDraft(v=>({...v,site_name:e.target.value}))}/></label><label>위도<input type="number" step="any" required value={siteDraft.latitude} onChange={e=>setSiteDraft(v=>({...v,latitude:e.target.value}))} placeholder="예: 37.0000"/></label><label>경도<input type="number" step="any" required value={siteDraft.longitude} onChange={e=>setSiteDraft(v=>({...v,longitude:e.target.value}))} placeholder="예: 127.0000"/></label><label>퇴근 판정 반경 (m)<input type="number" min="100" max="3000" step="50" required value={siteDraft.radius_m} onChange={e=>setSiteDraft(v=>({...v,radius_m:e.target.value}))}/></label><div className="work-site-actions"><button type="button" onClick={useMyLocationAsSite} disabled={workBusy}><MapPin size={16}/> 현재 위치로 지정</button><button className="primary" type="submit" disabled={workBusy}>근무지 설정 저장</button></div></form>{workplace&&<p className="muted">저장된 근무지: {workplace.site_name} · 반경 {workplace.radius_m}m</p>}<p className="work-warning">웹앱을 닫거나 휴대폰이 위치 접근을 제한하면 자동 퇴근이 작동하지 않을 수 있습니다. 수동 퇴근을 함께 사용해 주세요. GPS 오차 방지를 위해 이탈 위치를 재확인합니다.</p></section>;
+const attendancePanel=<section className="panel work-panel"><h2><Clock3 size={19}/> {owner?'직원 출퇴근 현황':'출근 · 퇴근'}</h2>{!owner&&<><p className="muted">등록된 근무지 안에서 출근 버튼을 누르세요. 브라우저의 위치 권한이 필요합니다.</p><div className="work-current"><span>현재 상태</span><strong>{activeShift?'출근 중':'퇴근 상태'}</strong>{activeShift&&<small>출근 시각: {dateTimeKST(activeShift.clock_in_at)}</small>}</div><div className="work-actions"><button type="button" className="primary" disabled={workBusy||!!activeShift||!workplace} onClick={clockIn}>출근하기</button><button type="button" disabled={workBusy||!activeShift} onClick={()=>clockOut(false)}>수동 퇴근</button></div>{!workplace&&<p className="work-warning">아직 근무지 기준점이 설정되지 않았습니다. 사업주에게 설정을 요청하세요.</p>}{activeShift&&<p className="muted" role="status">{locationNotice||'근무지 이탈 위치를 감시 중입니다.'}</p>}<p className="work-warning">자동 퇴근은 이 화면이 아닌 다른 웹앱 탭에서도 위치 허용 중이면 작동을 시도하지만, 웹앱을 종료하거나 위치 추적이 중단되면 보장되지 않습니다. 근무가 끝났는데 출근 중으로 남으면 수동 퇴근해 주세요.</p></>}{owner&&<><h3>선택 기간 출퇴근 기록</h3><div className="scroll"><table><thead><tr>{owner&&<th>직원</th>}<th>날짜</th><th>출근</th><th>퇴근</th><th>상태 / 방식</th></tr></thead><tbody>{(owner?periodAttend:attendance.filter(r=>r.employee_id===session?.user?.id)).map(r=><tr key={r.id}>{owner&&<td>{names[r.employee_id]||'직원'}</td>}<td>{r.work_date}</td><td>{dateTimeKST(r.clock_in_at)}</td><td>{dateTimeKST(r.clock_out_at)}</td><td><span className={'work-status '+(!r.clock_out_at?'status-pending':'')}>{!r.clock_out_at?'출근 중':r.clock_out_method==='geofence'?'자동 퇴근':'수동 퇴근'}</span></td></tr>)}{!(owner?periodAttend:attendance.filter(r=>r.employee_id===session?.user?.id)).length&&<tr><td colSpan={owner?5:4}>출퇴근 기록이 없습니다.</td></tr>}</tbody></table></div></>}</section>;
+const leavePanel=<section className="panel work-panel"><h2><CalendarDays size={19}/> {owner?'휴가 신청 현황 · 승인':'휴가 신청'}</h2>{!owner&&<form className="leave-form" onSubmit={submitLeave}><label>휴가 종류<select value={leaveForm.leave_type} onChange={e=>setLeaveForm(v=>({...v,leave_type:e.target.value}))}><option>연차</option><option>오전 반차</option><option>오후 반차</option><option>기타</option></select></label><label>시작일<input type="date" required value={leaveForm.start_date} onChange={e=>setLeaveForm(v=>({...v,start_date:e.target.value}))}/></label><label>종료일<input type="date" required min={leaveForm.start_date} value={leaveForm.end_date} onChange={e=>setLeaveForm(v=>({...v,end_date:e.target.value}))}/></label><label className="leave-reason">신청 사유<textarea maxLength={1000} rows={2} placeholder="사유(선택)" value={leaveForm.reason} onChange={e=>setLeaveForm(v=>({...v,reason:e.target.value}))}/></label><div className={'leave-deadline-note '+(leaveDeadlinePassed?'leave-deadline-expired':'')} role="status"><strong>휴가 시작 18시간 전 신청 마감</strong><span>기준 시작 시각: {leaveForm.leave_type==='오후 반차'?'13:00':'09:00'} (한국시간)</span><span>선택한 휴가 신청 마감: {leaveDeadlineText}</span>{leaveDeadlinePassed&&<strong>신청 마감이 지났습니다. 다른 휴가 시작일을 선택해 주세요.</strong>}</div><button type="submit" className="primary" disabled={workBusy||leaveDeadlinePassed}>휴가 신청하기</button></form>}{owner&&<p className="muted">선택 기간에 해당하는 휴가와 승인 대기 신청을 표시합니다. 승인 대기 건은 기간 밖이어도 보입니다.</p>}<div className="scroll"><table><thead><tr>{owner&&<th>직원</th>}<th>휴가 구분</th><th>기간</th><th>사유</th><th>상태</th><th>처리</th></tr></thead><tbody>{(owner?visibleLeaveItems:leaveItems.filter(r=>r.employee_id===session?.user?.id)).map(r=><tr key={r.id}>{owner&&<td>{names[r.employee_id]||'직원'}</td>}<td>{r.leave_type}</td><td>{r.start_date}{r.end_date!==r.start_date?' ~ '+r.end_date:''}</td><td className="leave-reason-cell">{r.reason||'—'}</td><td><span className={'work-status '+(r.status==='pending'?'status-pending':'')}>{leaveStatus[r.status]||r.status}</span></td><td><div className="work-row-buttons">{owner&&r.status==='pending'&&<><button disabled={workBusy} type="button" onClick={()=>decideLeave(r.id,'approved')}>승인</button><button disabled={workBusy} type="button" onClick={()=>decideLeave(r.id,'rejected')}>반려</button></>}{!owner&&r.status==='pending'&&<button disabled={workBusy} type="button" onClick={()=>cancelLeave(r.id)}>신청 취소</button>}</div></td></tr>)}{!(owner?visibleLeaveItems:leaveItems.filter(r=>r.employee_id===session?.user?.id)).length&&<tr><td colSpan={owner?6:5}>휴가 신청 기록이 없습니다.</td></tr>}</tbody></table></div></section>;
 if(!db)return <div className="center"><div className="login"><h1>무무베딩 수량관리</h1><p>클라우드 연결 전입니다. 프로젝트의 README 안내에 따라 Supabase 환경변수를 설정해 주세요.</p></div></div>;
 if(!ready)return <div className="center">불러오는 중...</div>;
 if(recoveryRoute)return <div className="center"><form className="login password-reset-form" onSubmit={submitNewPassword}>
@@ -426,9 +570,9 @@ if(!session)return <div className="center"><form className="login" onSubmit={aut
  </form></div>;
 if(!profile)return <div className="center">계정 정보를 불러오는 중...</div>;
 if(!profile.approved)return <div className="center"><div className="login"><div className="brand">MUMU BEDDING</div><h2>사업주 승인 대기 중</h2><p>{profile.name}님의 계정이 생성되었습니다. 사업주 승인 후 수량을 등록할 수 있습니다.</p><button onClick={()=>location.reload()}>승인 상태 새로고침</button><button className="plain" onClick={logout}>로그아웃</button></div></div>;
-const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['mine','내 기록 수정',ClipboardList],['history','수정이력',History]];
+const tabs=owner?[['dashboard','대시보드',LayoutDashboard],['entries','작업내역',ClipboardList],['history','수정이력',History],['staff','직원관리',Users]]:[['entry','수량 등록',Plus],['attendance','출퇴근',Clock3],['leave','휴가 신청',CalendarDays],['mine','내 기록 수정',ClipboardList],['history','수정이력',History]];
 const shownChanges=changes.filter(x=>owner||x.changed_by===session.user.id);
-return <div className="shell"><header><div><div className="brand">MUMU BEDDING</div><h1>수량관리 시스템</h1></div><div className="user"><span>{profile.name} {owner?'· 사업주':''}</span><button title="로그아웃" onClick={logout}><LogOut size={17}/></button></div></header><nav>{tabs.map(([id,label,Icon])=><button key={id} className={tab===id?'selected':''} onClick={()=>setTab(id)}><Icon size={17}/>{label}</button>)}</nav><main>{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}>닫기</button></div>}
+return <div className="shell"><header><div><div className="brand">MUMU BEDDING</div><h1>수량관리 시스템</h1></div><div className="user"><span>{profile.name} {owner?'· 사업주':''}</span><button title="로그아웃" onClick={logout}><LogOut size={17}/></button></div></header><nav>{tabs.map(([id,label,Icon])=><button key={id} className={tab===id?'selected':''} onClick={()=>setTab(id)}><Icon size={17}/>{label}</button>)}</nav><main>{notice&&<div className="notice">{notice}<button onClick={()=>setNotice('')}>닫기</button></div>}{workNotice&&<div className="notice" role="status">{workNotice}<button onClick={()=>setWorkNotice('')}>닫기</button></div>}
 {tab==='entry'&&<section className="panel editor"><h2>{editing?'작업내역 수정':'작업 수량 등록'}</h2><form onSubmit={save}><div className="address-entry-block">
  <div className="address-method-switch" role="tablist" aria-label="주소 입력 방식">
   <button type="button" role="tab" aria-selected={addressMethod==='search'} className={addressMethod==='search'?'active':''} onClick={()=>setAddressMethod('search')}>주소 검색 · 직접 입력</button>
@@ -453,6 +597,8 @@ return <div className="shell"><header><div><div className="brand">MUMU BEDDING</
  </div><div className="quantities">{[['duvet','이불커버'],['small','수건 소'],['large','수건 대']].map(([k,label])=><div className="quantity" key={k}><span>{label}</span>{k==='duvet'&&<small className="duvet-description">큰 것은 모두 이불로 세며, 다리지 않은 것도 포함합니다.</small>}<div><button type="button" onClick={()=>setForm(v=>({...v,[k]:Math.max(0,(Number(v[k])||0)-1)}))}><Minus size={18}/></button><input className="quantity-input" type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="off" onFocus={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} onClick={e=>{if(e.currentTarget.value==='0')e.currentTarget.select()}} aria-label={`${label} 수량 직접 입력`} value={form[k]} onChange={e=>setForm(v=>({...v,[k]:e.target.value===""?"":e.target.value.replace(/\D/g,"")}))} onBlur={()=>setForm(v=>({...v,[k]:v[k]===""?0:v[k]}))}/><button type="button" onClick={()=>setForm(v=>({...v,[k]:(Number(v[k])||0)+1}))}><Plus size={18}/></button></div></div>)}</div>{editing&&<><label>수정 사유<select value={reason} onChange={e=>setReason(e.target.value)}>{['주소지 수정','이불커버 수량 수정','수건 소 수량 수정','수건 대 수량 수정','전체 수정'].map(x=><option key={x}>{x}</option>)}</select></label><label>상세 수정 사유<textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="수정 이유를 입력하세요"/></label></>}<button className="primary" disabled={busy||photoBusy}>{busy||photoBusy?'처리 중...':editing?'수정 즉시 반영':'주소·수량 확인하기'}</button>{editing&&<button type="button" onClick={()=>{setEditing(null);setForm(empty());setChosenExistingAddress('');setPhotoMatches([]);setAddressMethod('search')}}>수정 취소</button>}</form><dialog ref={confirmDialogRef} className="entry-confirm-dialog" aria-labelledby="entry-confirm-title" onCancel={e=>{if(busy)e.preventDefault();else setPendingEntry(null)}} onClose={()=>{if(!busy)setPendingEntry(null)}}>{pendingEntry&&<div className="entry-confirm-content"><div className="entry-confirm-badge">등록 전 확인</div><h2 id="entry-confirm-title">주소와 수량이 맞나요?</h2><p className="entry-confirm-explanation">다시 한번 확인한 뒤 <b>확인 후 등록</b>을 눌러야 작업내역이 저장됩니다.</p><dl className="entry-confirm-details"><div className="entry-confirm-address"><dt>주소지</dt><dd>{pendingEntry.address}</dd></div><div><dt>이불커버</dt><dd>{pendingEntry.duvet.toLocaleString('ko-KR')}개</dd></div><div><dt>수건 소</dt><dd>{pendingEntry.small.toLocaleString('ko-KR')}개</dd></div><div><dt>수건 대</dt><dd>{pendingEntry.large.toLocaleString('ko-KR')}개</dd></div></dl>{confirmError&&<p className="entry-confirm-error" role="alert">{confirmError}</p>}<div className="entry-confirm-actions"><button type="button" autoFocus disabled={busy} onClick={()=>{setPendingEntry(null);setConfirmError('')}}>돌아가서 수정</button><button type="button" className="entry-confirm-submit" disabled={busy} onClick={confirmNewEntry}>{busy?'등록 중...':'확인 후 등록'}</button></div></div>}</dialog></section>}
 {['dashboard','entries','mine'].includes(tab)&&<><div className="toolbar"><div className="date-range"><div className="preset-buttons">{[['today','오늘'],['twoWeeks','최근 2주'],['month','최근 한 달']].map(([id,label])=><button key={id} type="button" className={preset===id?'selected-preset':''} onClick={()=>choosePreset(id)}>{label}</button>)}</div><label>시작일 <input type="date" value={startDate} max={endDate} onChange={e=>{setStartDate(e.target.value);setPreset('custom')}}/></label><label>종료일 <input type="date" value={endDate} min={startDate} onChange={e=>{setEndDate(e.target.value);setPreset('custom')}}/></label></div>{owner&&<><label>직원<select value={person} onChange={e=>setPerson(e.target.value)}><option value="all">전체 직원</option>{staff.filter(p=>p.approved).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label><label>시간대<select value={shift} onChange={e=>setShift(e.target.value)}><option>전체</option><option>오전</option><option>오후</option></select></label><button onClick={exportXlsx}><Download size={16}/> 엑셀</button></>}<button onClick={load}><RefreshCw size={16}/> 새로고침</button></div><div className="cards">{[['활동 직원',people(filtered)+'명'],['이불커버',total.duvet+'개'],['수건 소',total.small+'개'],['수건 대',total.large+'개'],['작업 건수',filtered.length+'건']].map(([k,v])=><div className="metric" key={k}><span>{k}</span><strong>{v}</strong></div>)}</div></>}
 {tab==='dashboard'&&<section className="panel"><h2>직원별 이불커버 · 근무일수</h2><p className="muted">선택한 기간의 등록 기록을 기준으로 집계합니다. 근무일수는 기록이 1건 이상 있는 날짜를 하루로 계산하며, 실제 출퇴근 기록과는 다를 수 있습니다.</p><div className="scroll"><table><thead><tr><th>직원</th><th>이불커버 합계</th><th>근무일수</th><th>작업 건수</th></tr></thead><tbody>{staffSummary.map(p=><tr key={p.id}><td>{p.name}</td><td>{p.duvet.toLocaleString('ko-KR')}개</td><td>{p.days.size}일</td><td>{p.count.toLocaleString('ko-KR')}건</td></tr>)}{!staffSummary.length&&<tr><td colSpan={4}>해당 기간의 등록 기록이 없습니다.</td></tr>}</tbody></table></div></section>}
+{tab==='dashboard'&&<><div className="work-dashboard-banner"><div><strong>출근 중 {attendance.filter(x=>!x.clock_out_at).length}명</strong></div><div><strong>휴가 승인 대기 {pendingLeaves.length}건</strong></div><div><button type="button" onClick={loadWork}><RefreshCw size={15}/> 근태 새로고침</button></div></div>{attendancePanel}{leavePanel}{workplacePanel}</>}
+{tab==='attendance'&&attendancePanel}{tab==='leave'&&leavePanel}
 {tab==='entries'&&<>{billingPanel}{ownerEditPanel}<section className="panel"><div className="owner-list-heading"><div><h2>전체 작업 내역</h2><p className="muted">체크박스로 정산할 작업을 선택하세요. 주소·수량 수정은 한 건만 선택하거나 해당 행의 ‘수정’ 버튼을 누르세요.</p></div><button type="button" className="owner-edit-selected" disabled={selectedRows.length!==1||ownerEditSaving} onClick={editSelectedOwnerEntry}>선택한 1건 주소·수량 수정</button></div><div className="owner-address-search"><label htmlFor="owner-entry-address-search"><Search size={16}/> 주소 검색</label><input id="owner-entry-address-search" type="search" value={addressSearch} onChange={e=>setAddressSearch(e.target.value)} placeholder="주소 일부를 입력해 작업내역 검색"/><span className="muted">{filtered.length.toLocaleString('ko-KR')}건 표시</span></div>{entryTable(filtered,true,true)}</section></>}
 {tab==='mine'&&<section className="panel"><h2>내 기록 수정 <small>작업내역을 확인하고 수정할 수 있습니다.</small></h2>{entryTable(filtered,true)}</section>}
 
